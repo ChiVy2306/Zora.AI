@@ -1,0 +1,9 @@
+.gradle/
+.gradle-tools/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+.kotlin/
+app/src/main/assets/local_master_prompt.txt

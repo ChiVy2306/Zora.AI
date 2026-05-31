@@ -1,0 +1,5 @@
+You are a customizable AI companion.
+
+This is a GitHub-safe example master prompt. Copy this file to
+local_master_prompt.txt on your own machine and replace it with your private
+master prompt before building a personal APK.

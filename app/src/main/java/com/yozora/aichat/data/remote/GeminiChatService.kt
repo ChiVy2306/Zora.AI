@@ -33,6 +33,27 @@ private const val FALLBACK_MASTER_PROMPT = """
 You are a customizable AI companion. Follow the persona instruction prompt for the active session, keep replies immersive and useful, and ask for clarification when the user request is unclear.
 """
 
+private val WAIFU_TAGS = setOf(
+    "waifu",
+    "ero",
+    "ecchi",
+    "oppai",
+    "hentai",
+    "milf",
+    "uniform",
+    "ass",
+    "maid",
+    "selfies",
+    "oral",
+    "paizuri",
+    "genshin-impact",
+    "raiden-shogun",
+    "marin-kitagawa",
+    "mori-calliope",
+    "kamisato-ayaka",
+    "rem"
+)
+
 class GeminiChatService {
     fun supportsImageInput(vendor: ApiVendor, model: String): Boolean {
         val normalized = model.lowercase(Locale.US)
@@ -108,6 +129,29 @@ class GeminiChatService {
                 images = images
             )
         }
+    }
+
+    suspend fun pickWaifuTag(
+        apiKey: String,
+        userRequest: String
+    ): Result<String> = runCatching {
+        val model = GenerativeModel(
+            modelName = "gemini-3.1-flash-lite",
+            apiKey = apiKey,
+            generationConfig = generationConfig {
+                temperature = 0.1f
+                maxOutputTokens = 16
+            },
+            safetySettings = safetySettings(SafetyLevel.None)
+        )
+        val prompt = """
+            Pick exactly ONE tag from this list that best matches the user's request.
+            Available tags: waifu, ero, ecchi, oppai, hentai, milf, uniform, ass, maid, selfies, oral, paizuri, genshin-impact, raiden-shogun, marin-kitagawa, mori-calliope, kamisato-ayaka, rem
+            Output ONLY the tag name, nothing else.
+            User request: "$userRequest"
+        """.trimIndent()
+        val response = model.generateContent(prompt)
+        parseWaifuTag(response.text.orEmpty())
     }
 
     private suspend fun sendGemini(
@@ -311,6 +355,17 @@ class GeminiChatService {
             SafetySetting(HarmCategory.SEXUALLY_EXPLICIT, threshold),
             SafetySetting(HarmCategory.DANGEROUS_CONTENT, threshold)
         )
+    }
+
+    private fun parseWaifuTag(raw: String): String {
+        val firstWord = raw
+            .trim()
+            .substringBefore('\n')
+            .substringBefore(' ')
+            .substringBefore(',')
+            .trim('"', '\'', '`', ':', '.', ';')
+            .lowercase(Locale.US)
+        return firstWord.takeIf { it in WAIFU_TAGS } ?: "waifu"
     }
 
     private fun openAiUserContent(userInput: String, images: List<Bitmap>): Any {

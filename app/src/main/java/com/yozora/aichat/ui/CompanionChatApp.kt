@@ -163,7 +163,7 @@ import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private const val APP_VERSION_NAME = "1.0.3"
+private const val APP_VERSION_NAME = "1.0.4"
 
 @Composable
 fun CompanionChatApp(
@@ -195,6 +195,7 @@ fun CompanionChatApp(
             onAttachImages = viewModel::attachImages,
             onRemoveAttachedImage = viewModel::removeAttachedImage,
             onWebSearchChange = viewModel::updateWebSearchEnabled,
+            onRequestAnimeImage = viewModel::requestAnimeImage,
             onOpenImage = { viewedImageUri = it },
             onMessageLongPress = { actionMessage = it },
             onOpenSessions = viewModel::openSessionDrawer,
@@ -266,6 +267,7 @@ fun CompanionChatApp(
                 moreOptions = viewModel.morePersonaOptions,
                 activeApiKeyLabel = viewModel.activeApiKeyLabel,
                 tavilyApiKeyLabel = viewModel.tavilyApiKeyLabel,
+                waifuApiTokenLabel = viewModel.waifuApiTokenLabel,
                 quotaUsage = viewModel.quotaUsage,
                 dailyRequestLimit = viewModel.dailyRequestLimit,
                 onBack = viewModel::closePersonaSheet,
@@ -284,6 +286,8 @@ fun CompanionChatApp(
                 onClearApiKey = viewModel::clearApiKey,
                 onEditTavilyKey = viewModel::openTavilyApiKeyDialog,
                 onClearTavilyKey = viewModel::clearTavilyApiKey,
+                onEditWaifuToken = viewModel::openWaifuTokenDialog,
+                onClearWaifuToken = viewModel::clearWaifuApiToken,
                 onDeleteSession = viewModel::deleteActiveSession,
                 onSave = viewModel::savePersona
             )
@@ -361,12 +365,14 @@ private fun ChatScreen(
     onAttachImages: (List<android.net.Uri>) -> Unit,
     onRemoveAttachedImage: (android.net.Uri) -> Unit,
     onWebSearchChange: (Boolean) -> Unit,
+    onRequestAnimeImage: (String) -> Unit,
     onOpenImage: (android.net.Uri) -> Unit,
     onMessageLongPress: (ChatMessage) -> Unit,
     onOpenSessions: () -> Unit,
     onOpenPersona: () -> Unit
 ) {
-    var attachmentSheetVisible by remember { mutableStateOf(false) }
+    var toolsSheetVisible by remember { mutableStateOf(false) }
+    var animeImageDialogVisible by remember { mutableStateOf(false) }
     var cameraOutputUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -471,16 +477,13 @@ private fun ChatScreen(
                     draft = draft,
                     isSending = isSending,
                     attachedImageUris = attachedImageUris,
-                    webSearchEnabled = webSearchEnabled,
-                    canUseWebSearch = canUseWebSearch,
                     onDraftChange = onDraftChange,
                     onSend = {
                         focusManager.clearFocus()
                         onSend()
                     },
-                    onAttachImage = { attachmentSheetVisible = true },
+                    onOpenTools = { toolsSheetVisible = true },
                     onRemoveAttachedImage = onRemoveAttachedImage,
-                    onWebSearchChange = onWebSearchChange,
                     onOpenImage = onOpenImage
                 )
             }
@@ -519,22 +522,26 @@ private fun ChatScreen(
         }
     }
 
-    if (attachmentSheetVisible) {
-        AttachmentPickerSheet(
-            onDismiss = { attachmentSheetVisible = false },
+    if (toolsSheetVisible) {
+        ChatToolsSheet(
+            onDismiss = { toolsSheetVisible = false },
             onCamera = {
                 val uri = createCameraImageUri(context)
                 cameraOutputUri = uri
-                attachmentSheetVisible = false
+                toolsSheetVisible = false
                 cameraLauncher.launch(uri)
             },
             onPhotos = {
-                attachmentSheetVisible = false
+                toolsSheetVisible = false
                 photoPicker.launch("image/*")
             },
             onFiles = {
-                attachmentSheetVisible = false
+                toolsSheetVisible = false
                 filePicker.launch(arrayOf("image/*"))
+            },
+            onAnimeImage = {
+                toolsSheetVisible = false
+                animeImageDialogVisible = true
             },
             webSearchEnabled = webSearchEnabled,
             webSearchAvailable = canUseWebSearch,
@@ -542,8 +549,19 @@ private fun ChatScreen(
         )
     }
 
-    if (attachmentSheetVisible) {
-        BackHandler { attachmentSheetVisible = false }
+    if (animeImageDialogVisible) {
+        AnimeImageRequestDialog(
+            onDismiss = { animeImageDialogVisible = false },
+            onSubmit = { request ->
+                animeImageDialogVisible = false
+                onRequestAnimeImage(request)
+            }
+        )
+    }
+
+    when {
+        animeImageDialogVisible -> BackHandler { animeImageDialogVisible = false }
+        toolsSheetVisible -> BackHandler { toolsSheetVisible = false }
     }
 }
 
@@ -1114,6 +1132,22 @@ private fun MessageBubble(
                 )
         ) {
             Column(modifier = Modifier.padding(18.dp)) {
+                if (message.isImageLoading) {
+                    AnimeImageLoadingCard()
+                }
+                message.remoteImageUrl?.let { imageUrl ->
+                    val imageUri = android.net.Uri.parse(imageUrl)
+                    Image(
+                        painter = rememberAsyncImagePainter(imageUrl),
+                        contentDescription = "Fetched image",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(320.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { onOpenImage(imageUri) }
+                    )
+                }
                 if (message.imageUris.isNotEmpty()) {
                     message.imageUris.forEachIndexed { index, uri ->
                         Image(
@@ -1134,12 +1168,15 @@ private fun MessageBubble(
                         Spacer(modifier = Modifier.height(12.dp))
                     }
                 }
-                Text(
-                    text = formatMarkdownLite(message.content),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = AppTextPrimary,
-                    lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
-                )
+                val showText = message.content.isNotBlank() && !message.isImageLoading && message.remoteImageUrl == null
+                if (showText) {
+                    Text(
+                        text = formatMarkdownLite(message.content),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = AppTextPrimary,
+                        lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+                    )
+                }
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1161,6 +1198,50 @@ private fun MessageBubble(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnimeImageLoadingCard() {
+    val transition = rememberInfiniteTransition(label = "animeImageLoading")
+    val alpha by transition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0.68f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "animeImageLoadingAlpha"
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(320.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(AppStroke.copy(alpha = alpha))
+    ) {
+        Surface(
+            color = AppSurface.copy(alpha = 0.72f),
+            shape = RoundedCornerShape(999.dp),
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(
+                    color = AppAccentSoft,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Fetching image",
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
         }
     }
@@ -1274,11 +1355,12 @@ private fun ActionSheetRow(
 }
 
 @Composable
-private fun AttachmentPickerSheet(
+private fun ChatToolsSheet(
     onDismiss: () -> Unit,
     onCamera: () -> Unit,
     onPhotos: () -> Unit,
     onFiles: () -> Unit,
+    onAnimeImage: () -> Unit,
     webSearchEnabled: Boolean,
     webSearchAvailable: Boolean,
     onWebSearchChange: (Boolean) -> Unit
@@ -1326,7 +1408,7 @@ private fun AttachmentPickerSheet(
                         )
                     }
                     Text(
-                        text = "Add to chat",
+                        text = "Chat tools",
                         color = AppTextPrimary,
                         style = MaterialTheme.typography.titleLarge,
                         textAlign = TextAlign.Center,
@@ -1360,6 +1442,12 @@ private fun AttachmentPickerSheet(
                         modifier = Modifier.weight(1f)
                     )
                 }
+
+                ActionSheetRow(
+                    icon = Icons.Rounded.Search,
+                    label = "Anime image",
+                    onClick = onAnimeImage
+                )
 
                 Box(
                     modifier = Modifier
@@ -1407,6 +1495,68 @@ private fun AttachmentPickerSheet(
 }
 
 @Composable
+private fun AnimeImageRequestDialog(
+    onDismiss: () -> Unit,
+    onSubmit: (String) -> Unit
+) {
+    var request by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = AppSurface,
+        title = {
+            Text(
+                text = "Describe the image",
+                color = AppTextPrimary,
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = request,
+                    onValueChange = { request = it },
+                    singleLine = false,
+                    minLines = 2,
+                    maxLines = 4,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            if (request.isNotBlank()) {
+                                onSubmit(request)
+                            }
+                        }
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = AppTextPrimary,
+                        unfocusedTextColor = AppTextPrimary,
+                        focusedBorderColor = AppAccent.copy(alpha = 0.7f),
+                        unfocusedBorderColor = AppStroke,
+                        cursorColor = AppAccent,
+                        focusedContainerColor = AppSurface2,
+                        unfocusedContainerColor = AppSurface2
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSubmit(request) },
+                enabled = request.isNotBlank()
+            ) {
+                Text(text = "Fetch", color = AppAccentSoft)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "Cancel", color = AppTextSecondary)
+            }
+        }
+    )
+}
+
+@Composable
 private fun AttachmentOptionCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
@@ -1448,13 +1598,10 @@ private fun ChatInputBar(
     draft: String,
     isSending: Boolean,
     attachedImageUris: List<android.net.Uri>,
-    webSearchEnabled: Boolean,
-    canUseWebSearch: Boolean,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
-    onAttachImage: () -> Unit,
+    onOpenTools: () -> Unit,
     onRemoveAttachedImage: (android.net.Uri) -> Unit,
-    onWebSearchChange: (Boolean) -> Unit,
     onOpenImage: (android.net.Uri) -> Unit
 ) {
     val sendScale by animateFloatAsState(
@@ -1493,10 +1640,10 @@ private fun ChatInputBar(
                     .padding(start = 8.dp, top = 8.dp, end = 10.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.Bottom
             ) {
-                IconButton(onClick = onAttachImage) {
+                IconButton(onClick = onOpenTools) {
                     Icon(
-                        imageVector = Icons.Rounded.AttachFile,
-                        contentDescription = "Attach image",
+                        imageVector = Icons.Rounded.Menu,
+                        contentDescription = "Open chat tools",
                         tint = AppTextPrimary
                     )
                 }
@@ -1520,27 +1667,6 @@ private fun ChatInputBar(
                         unfocusedContainerColor = Color.Transparent
                     )
                 )
-                IconButton(
-                    onClick = { onWebSearchChange(!webSearchEnabled) },
-                    enabled = canUseWebSearch,
-                    modifier = Modifier
-                        .padding(end = 6.dp)
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (webSearchEnabled) AppAccentDim else Color.Transparent
-                        )
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = "Toggle web search",
-                        tint = when {
-                            webSearchEnabled -> AppAccentSoft
-                            canUseWebSearch -> AppTextPrimary
-                            else -> AppTextSecondary.copy(alpha = 0.45f)
-                        }
-                    )
-                }
                 Button(
                     onClick = onSend,
                     enabled = (draft.isNotBlank() || attachedImageUris.isNotEmpty()) && !isSending,
@@ -1681,6 +1807,7 @@ private fun PersonaSettingsSheet(
     moreOptions: Boolean,
     activeApiKeyLabel: String?,
     tavilyApiKeyLabel: String?,
+    waifuApiTokenLabel: String?,
     quotaUsage: QuotaUsageState,
     dailyRequestLimit: Int?,
     onBack: () -> Unit,
@@ -1699,6 +1826,8 @@ private fun PersonaSettingsSheet(
     onClearApiKey: () -> Unit,
     onEditTavilyKey: () -> Unit,
     onClearTavilyKey: () -> Unit,
+    onEditWaifuToken: () -> Unit,
+    onClearWaifuToken: () -> Unit,
     onDeleteSession: () -> Unit,
     onSave: () -> Unit
 ) {
@@ -1778,6 +1907,7 @@ private fun PersonaSettingsSheet(
                 background = background,
                 activeApiKeyLabel = activeApiKeyLabel,
                 tavilyApiKeyLabel = tavilyApiKeyLabel,
+                waifuApiTokenLabel = waifuApiTokenLabel,
                 quotaUsage = quotaUsage,
                 dailyRequestLimit = dailyRequestLimit,
                 onToggle = onToggleMore,
@@ -1790,7 +1920,9 @@ private fun PersonaSettingsSheet(
                 onEditApiKey = onEditApiKey,
                 onClearApiKey = onClearApiKey,
                 onEditTavilyKey = onEditTavilyKey,
-                onClearTavilyKey = onClearTavilyKey
+                onClearTavilyKey = onClearTavilyKey,
+                onEditWaifuToken = onEditWaifuToken,
+                onClearWaifuToken = onClearWaifuToken
             )
 
             Button(
@@ -2086,6 +2218,7 @@ private fun MoreOptions(
     background: ChatBackground,
     activeApiKeyLabel: String?,
     tavilyApiKeyLabel: String?,
+    waifuApiTokenLabel: String?,
     quotaUsage: QuotaUsageState,
     dailyRequestLimit: Int?,
     onToggle: () -> Unit,
@@ -2098,7 +2231,9 @@ private fun MoreOptions(
     onEditApiKey: () -> Unit,
     onClearApiKey: () -> Unit,
     onEditTavilyKey: () -> Unit,
-    onClearTavilyKey: () -> Unit
+    onClearTavilyKey: () -> Unit,
+    onEditWaifuToken: () -> Unit,
+    onClearWaifuToken: () -> Unit
 ) {
     Surface(
         color = AppSurface,
@@ -2165,12 +2300,15 @@ private fun MoreOptions(
                     ApiKeySummary(
                         activeApiKeyLabel = activeApiKeyLabel,
                         tavilyApiKeyLabel = tavilyApiKeyLabel,
+                        waifuApiTokenLabel = waifuApiTokenLabel,
                         quotaUsage = quotaUsage,
                         dailyRequestLimit = dailyRequestLimit,
                         onEditApiKey = onEditApiKey,
                         onClearApiKey = onClearApiKey,
                         onEditTavilyKey = onEditTavilyKey,
-                        onClearTavilyKey = onClearTavilyKey
+                        onClearTavilyKey = onClearTavilyKey,
+                        onEditWaifuToken = onEditWaifuToken,
+                        onClearWaifuToken = onClearWaifuToken
                     )
                 }
             }
@@ -2280,12 +2418,15 @@ private fun ChatBackground.sameChoice(other: ChatBackground): Boolean {
 private fun ApiKeySummary(
     activeApiKeyLabel: String?,
     tavilyApiKeyLabel: String?,
+    waifuApiTokenLabel: String?,
     quotaUsage: QuotaUsageState,
     dailyRequestLimit: Int?,
     onEditApiKey: () -> Unit,
     onClearApiKey: () -> Unit,
     onEditTavilyKey: () -> Unit,
-    onClearTavilyKey: () -> Unit
+    onClearTavilyKey: () -> Unit,
+    onEditWaifuToken: () -> Unit,
+    onClearWaifuToken: () -> Unit
 ) {
     Text(
         text = "API keys",
@@ -2314,6 +2455,14 @@ private fun ApiKeySummary(
                 emptyText = "No Tavily key saved",
                 onEdit = onEditTavilyKey,
                 onClear = onClearTavilyKey
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            ApiKeySlot(
+                label = "Waifu.im token",
+                keyLabel = waifuApiTokenLabel,
+                emptyText = "No Waifu.im token saved",
+                onEdit = onEditWaifuToken,
+                onClear = onClearWaifuToken
             )
             QuotaMonitor(
                 usage = quotaUsage,

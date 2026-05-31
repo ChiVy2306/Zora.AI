@@ -22,6 +22,7 @@ import com.yozora.aichat.data.db.PersonaEntity
 import com.yozora.aichat.data.remote.GeminiChatReply
 import com.yozora.aichat.data.remote.GeminiChatService
 import com.yozora.aichat.data.remote.TavilyRepository
+import com.yozora.aichat.data.remote.WaifuImageRepository
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -41,6 +42,8 @@ data class ChatMessage(
     val role: String,
     val content: String,
     val imageUris: List<Uri> = emptyList(),
+    val remoteImageUrl: String? = null,
+    val isImageLoading: Boolean = false,
     val time: String = currentTime()
 ) {
     val imageUri: Uri?
@@ -156,7 +159,8 @@ data class QuotaUsageState(
 
 private enum class ApiKeyDialogTarget {
     Provider,
-    Tavily
+    Tavily,
+    Waifu
 }
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -164,6 +168,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val apiKeyManager = ApiKeyManager(settingsDataStore)
     private val geminiChatService = GeminiChatService()
     private val tavilyRepository = TavilyRepository()
+    private val waifuImageRepository = WaifuImageRepository()
     private val masterSystemPrompt = loadMasterPrompt(application)
     private val chatStateKey = stringPreferencesKey("chat_state_v1")
     private val appIconChoiceKey = stringPreferencesKey("app_icon_choice")
@@ -198,6 +203,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     var tavilyApiKeyLabel by mutableStateOf<String?>(null)
+        private set
+
+    var waifuApiTokenLabel by mutableStateOf<String?>(null)
         private set
 
     var chatError by mutableStateOf<String?>(null)
@@ -247,6 +255,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         get() = when (apiKeyDialogTarget) {
             ApiKeyDialogTarget.Provider -> "${persona.vendor.label} API key"
             ApiKeyDialogTarget.Tavily -> "Tavily API key"
+            ApiKeyDialogTarget.Waifu -> "Waifu.im API token"
         }
 
     val canUseWebSearch: Boolean
@@ -279,6 +288,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 if (key.isNullOrBlank()) {
                     webSearchEnabled = false
                 }
+            }
+        }
+        viewModelScope.launch {
+            apiKeyManager.waifuToken.collectLatest { token ->
+                waifuApiTokenLabel = token?.let(apiKeyManager::mask)
             }
         }
     }
@@ -401,6 +415,70 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         sendDraft()
     }
 
+    fun requestAnimeImage(request: String) {
+        val cleanRequest = request.trim()
+        if (cleanRequest.isEmpty()) return
+        viewModelScope.launch {
+            val waifuToken = apiKeyManager.keyForWaifu()
+            if (waifuToken.isNullOrBlank()) {
+                openWaifuTokenDialog()
+                chatError = "Add a Waifu.im token first."
+                return@launch
+            }
+
+            val sessionId = activeSessionId
+            val userMessage = ChatMessage(role = "user", content = cleanRequest)
+            val loadingMessageId = UUID.randomUUID().toString()
+            val loadingMessage = ChatMessage(
+                id = loadingMessageId,
+                role = "model",
+                content = "",
+                isImageLoading = true
+            )
+            chatError = null
+            appendMessage(
+                sessionId = sessionId,
+                message = userMessage,
+                preview = cleanRequest.take(72)
+            )
+            appendMessage(
+                sessionId = sessionId,
+                message = loadingMessage,
+                preview = "Finding image..."
+            )
+
+            val tag = pickAnimeImageTag(cleanRequest)
+            val imageUrl = waifuImageRepository.randomPortraitImageUrl(
+                token = waifuToken,
+                tag = tag
+            ) ?: waifuImageRepository.randomPortraitImageUrl(
+                token = waifuToken,
+                tag = "ero"
+            )
+
+            val replacement = if (imageUrl == null) {
+                ChatMessage(
+                    id = loadingMessageId,
+                    role = "model",
+                    content = "Couldn't find an image for that 😔"
+                )
+            } else {
+                ChatMessage(
+                    id = loadingMessageId,
+                    role = "model",
+                    content = "",
+                    remoteImageUrl = imageUrl
+                )
+            }
+            replaceMessage(
+                sessionId = sessionId,
+                messageId = loadingMessageId,
+                message = replacement,
+                preview = if (imageUrl == null) replacement.content else "[image] $cleanRequest".take(72)
+            )
+        }
+    }
+
     fun openPersonaSheet() {
         personaSheetVisible = true
     }
@@ -483,6 +561,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         apiKeyDialogVisible = true
     }
 
+    fun openWaifuTokenDialog() {
+        apiKeyDialogTarget = ApiKeyDialogTarget.Waifu
+        apiKeyDraft = ""
+        apiKeyDialogVisible = true
+    }
+
     fun closeApiKeyDialog() {
         apiKeyDialogVisible = false
         apiKeyDraft = ""
@@ -497,6 +581,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             when (apiKeyDialogTarget) {
                 ApiKeyDialogTarget.Provider -> apiKeyManager.replaceProviderKey(persona.vendor.id, apiKeyDraft)
                 ApiKeyDialogTarget.Tavily -> apiKeyManager.replaceTavilyKey(apiKeyDraft)
+                ApiKeyDialogTarget.Waifu -> apiKeyManager.replaceWaifuToken(apiKeyDraft)
             }
             apiKeyDialogVisible = false
             apiKeyDraft = ""
@@ -515,6 +600,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             apiKeyManager.clearTavilyKey()
             webSearchEnabled = false
+            chatError = null
+        }
+    }
+
+    fun clearWaifuApiToken() {
+        viewModelScope.launch {
+            apiKeyManager.clearWaifuToken()
             chatError = null
         }
     }
@@ -674,6 +766,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun replaceMessage(
+        sessionId: String,
+        messageId: String,
+        message: ChatMessage,
+        preview: String
+    ) {
+        val index = sessions.indexOfFirst { it.id == sessionId }
+        if (index >= 0) {
+            val session = sessions[index]
+            val messageIndex = session.messages.indexOfFirst { it.id == messageId }
+            if (messageIndex >= 0) {
+                val updatedMessages = session.messages.toMutableList()
+                updatedMessages[messageIndex] = message
+                sessions[index] = session.copy(
+                    messages = updatedMessages,
+                    preview = preview,
+                    updatedAt = currentTime()
+                )
+                persistChatState()
+            }
+        }
+    }
+
     private suspend fun restoreChatState() {
         val rawState = settingsDataStore.data.first()[chatStateKey] ?: return
         val restoredState = decodeChatState(rawState) ?: return
@@ -743,7 +858,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun previewFor(messages: List<ChatMessage>): String {
         val message = messages.lastOrNull() ?: return "No messages yet"
-        return if (message.imageUris.isEmpty()) {
+        return if (message.isImageLoading) {
+            "Finding image..."
+        } else if (message.remoteImageUrl != null) {
+            "[image]"
+        } else if (message.imageUris.isEmpty()) {
             message.content.take(72)
         } else {
             "[${message.imageUris.size} image] ${message.content.take(58)}".trim()
@@ -810,6 +929,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             query = content
         ) ?: content
     }
+
+    private suspend fun pickAnimeImageTag(request: String): String {
+        val geminiKey = apiKeyManager.keyForProvider(ApiVendor.Google.id) ?: return "waifu"
+        return geminiChatService.pickWaifuTag(
+            apiKey = geminiKey,
+            userRequest = request
+        ).getOrDefault("waifu")
+    }
 }
 
 private data class RestoredChatState(
@@ -855,7 +982,7 @@ private fun ChatSession.toJson(): JSONObject {
         .put(
             "messages",
             JSONArray().apply {
-                messages.forEach { message -> put(message.toJson()) }
+                messages.filterNot { it.isImageLoading }.forEach { message -> put(message.toJson()) }
             }
         )
 }
@@ -958,6 +1085,7 @@ private fun ChatMessage.toJson(): JSONObject {
         .put("id", id)
         .put("role", role)
         .put("content", content)
+        .put("remoteImageUrl", remoteImageUrl ?: JSONObject.NULL)
         .put(
             "imageUris",
             JSONArray().apply {
@@ -983,6 +1111,8 @@ private fun JSONObject.toChatMessage(): ChatMessage {
         role = optString("role").ifBlank { "user" },
         content = optString("content"),
         imageUris = restoredImageUris.take(6),
+        remoteImageUrl = optNullableString("remoteImageUrl"),
+        isImageLoading = false,
         time = optString("time").ifBlank { currentTime() }
     )
 }
@@ -994,7 +1124,9 @@ private fun JSONObject.optNullableString(name: String): String? {
 
 private fun previewForRestored(messages: List<ChatMessage>): String {
     val message = messages.lastOrNull() ?: return "No messages yet"
-    return if (message.imageUris.isEmpty()) {
+    return if (message.remoteImageUrl != null) {
+        "[image]"
+    } else if (message.imageUris.isEmpty()) {
         message.content.take(72)
     } else {
         "[${message.imageUris.size} image] ${message.content.take(58)}".trim()
@@ -1031,7 +1163,9 @@ private fun PersonaUiState.toEntity(id: String): PersonaEntity {
 }
 
 private fun List<ChatMessage>.toEntities(chatId: String): List<MessageEntity> {
-    return map { message ->
+    return filterNot { message ->
+        message.isImageLoading || (message.remoteImageUrl != null && message.content.isBlank())
+    }.map { message ->
         MessageEntity(
             id = message.id,
             chatId = chatId,

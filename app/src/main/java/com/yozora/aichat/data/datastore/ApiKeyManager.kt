@@ -16,6 +16,7 @@ class ApiKeyManager(
     private val keysKey = stringSetPreferencesKey("gemini_api_keys")
     private val activeIndexKey = intPreferencesKey("gemini_active_key_index")
     private val tavilyApiKey = stringPreferencesKey("tavily_api_key")
+    private val waifuApiToken = stringPreferencesKey("waifu_api_token")
 
     val keys: Flow<List<String>> = dataStore.data.map { preferences ->
         preferences[keysKey]?.toList().orEmpty()
@@ -114,6 +115,31 @@ class ApiKeyManager(
     suspend fun clearTavilyKey() {
         dataStore.edit { preferences ->
             preferences.remove(tavilyApiKey)
+        }
+    }
+
+    val waifuToken: Flow<String?> = dataStore.data.map { preferences ->
+        preferences[waifuApiToken]
+    }
+
+    suspend fun keyForWaifu(): String? {
+        return dataStore.data.first()[waifuApiToken]
+    }
+
+    suspend fun replaceWaifuToken(token: String) {
+        val trimmed = token.trim()
+        dataStore.edit { preferences ->
+            if (trimmed.isEmpty()) {
+                preferences.remove(waifuApiToken)
+            } else {
+                preferences[waifuApiToken] = trimmed
+            }
+        }
+    }
+
+    suspend fun clearWaifuToken() {
+        dataStore.edit { preferences ->
+            preferences.remove(waifuApiToken)
         }
     }
 

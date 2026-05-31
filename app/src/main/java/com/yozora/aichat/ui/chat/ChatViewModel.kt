@@ -21,6 +21,7 @@ import com.yozora.aichat.data.db.MessageEntity
 import com.yozora.aichat.data.db.PersonaEntity
 import com.yozora.aichat.data.remote.GeminiChatReply
 import com.yozora.aichat.data.remote.GeminiChatService
+import com.yozora.aichat.data.remote.TavilyRepository
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -153,10 +154,16 @@ data class QuotaUsageState(
     val lastTotalTokens: Int = 0
 )
 
+private enum class ApiKeyDialogTarget {
+    Provider,
+    Tavily
+}
+
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val settingsDataStore = application.settingsDataStore
     private val apiKeyManager = ApiKeyManager(settingsDataStore)
     private val geminiChatService = GeminiChatService()
+    private val tavilyRepository = TavilyRepository()
     private val masterSystemPrompt = loadMasterPrompt(application)
     private val chatStateKey = stringPreferencesKey("chat_state_v1")
     private val appIconChoiceKey = stringPreferencesKey("app_icon_choice")
@@ -185,7 +192,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     var apiKeyDraft by mutableStateOf("")
         private set
 
+    private var apiKeyDialogTarget = ApiKeyDialogTarget.Provider
+
     var savedApiKeys by mutableStateOf<Map<String, String>>(emptyMap())
+        private set
+
+    var tavilyApiKeyLabel by mutableStateOf<String?>(null)
         private set
 
     var chatError by mutableStateOf<String?>(null)
@@ -231,6 +243,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val activeApiKeyLabel: String?
         get() = savedApiKeys[persona.vendor.id]?.let(apiKeyManager::mask)
 
+    val apiKeyDialogTitle: String
+        get() = when (apiKeyDialogTarget) {
+            ApiKeyDialogTarget.Provider -> "${persona.vendor.label} API key"
+            ApiKeyDialogTarget.Tavily -> "Tavily API key"
+        }
+
+    val canUseWebSearch: Boolean
+        get() = persona.vendor == ApiVendor.Google && tavilyApiKeyLabel != null
+
     val dailyRequestLimit: Int?
         get() = when (persona.model) {
             "gemini-3.1-flash-lite" -> 500
@@ -250,6 +271,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             apiKeyManager.providerKeys(ApiVendor.entries.map { it.id }).collectLatest { keys ->
                 savedApiKeys = keys
+            }
+        }
+        viewModelScope.launch {
+            apiKeyManager.tavilyKey.collectLatest { key ->
+                tavilyApiKeyLabel = key?.let(apiKeyManager::mask)
+                if (key.isNullOrBlank()) {
+                    webSearchEnabled = false
+                }
             }
         }
     }
@@ -274,8 +303,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 chatError = "${persona.model} does not support image input. Pick a vision model or remove the image."
                 return@launch
             }
-            if (webSearchEnabled && provider != ApiVendor.Google) {
-                chatError = "Web search uses Gemini grounding. Switch API vendor to Google or turn it off."
+            if (webSearchEnabled && !canUseWebSearch) {
+                chatError = "Add a Tavily key and use Google as the API vendor to turn on web search."
                 return@launch
             }
 
@@ -298,16 +327,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 message = userMessage,
                 preview = if (imageUris.isEmpty()) content.take(72) else "[${imageUris.size} image] ${content.take(58)}"
             )
+            val outboundContent = tavilyAugmentedInput(
+                enabled = webSearchEnabled,
+                provider = provider,
+                content = content
+            )
 
             val result = geminiChatService.sendMessage(
                 apiKey = apiKey,
                 persona = session.persona.toEntity(sessionId),
                 history = history.toEntities(sessionId),
-                userInput = content,
+                userInput = outboundContent,
                 vendor = provider,
                 safetyLevel = session.persona.safetyLevel,
                 images = loadedImages,
-                webSearchEnabled = webSearchEnabled,
+                webSearchEnabled = false,
                 masterPrompt = masterSystemPrompt
             )
 
@@ -438,6 +472,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openApiKeyDialog() {
+        apiKeyDialogTarget = ApiKeyDialogTarget.Provider
+        apiKeyDraft = ""
+        apiKeyDialogVisible = true
+    }
+
+    fun openTavilyApiKeyDialog() {
+        apiKeyDialogTarget = ApiKeyDialogTarget.Tavily
         apiKeyDraft = ""
         apiKeyDialogVisible = true
     }
@@ -453,7 +494,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveApiKey() {
         viewModelScope.launch {
-            apiKeyManager.replaceProviderKey(persona.vendor.id, apiKeyDraft)
+            when (apiKeyDialogTarget) {
+                ApiKeyDialogTarget.Provider -> apiKeyManager.replaceProviderKey(persona.vendor.id, apiKeyDraft)
+                ApiKeyDialogTarget.Tavily -> apiKeyManager.replaceTavilyKey(apiKeyDraft)
+            }
             apiKeyDialogVisible = false
             apiKeyDraft = ""
             chatError = null
@@ -463,6 +507,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun clearApiKey() {
         viewModelScope.launch {
             apiKeyManager.clearProviderKey(persona.vendor.id)
+            chatError = null
+        }
+    }
+
+    fun clearTavilyApiKey() {
+        viewModelScope.launch {
+            apiKeyManager.clearTavilyKey()
+            webSearchEnabled = false
             chatError = null
         }
     }
@@ -556,7 +608,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateWebSearchEnabled(value: Boolean) {
-        webSearchEnabled = value && persona.vendor == ApiVendor.Google
+        webSearchEnabled = value && canUseWebSearch
     }
 
     fun openAppSettings() {
@@ -744,6 +796,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
         }
+    }
+
+    private suspend fun tavilyAugmentedInput(
+        enabled: Boolean,
+        provider: ApiVendor,
+        content: String
+    ): String {
+        if (!enabled || provider != ApiVendor.Google) return content
+        val tavilyKey = apiKeyManager.keyForTavily() ?: return content
+        return tavilyRepository.searchContext(
+            apiKey = tavilyKey,
+            query = content
+        ) ?: content
     }
 }
 

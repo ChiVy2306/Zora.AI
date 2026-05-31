@@ -15,6 +15,7 @@ class ApiKeyManager(
 ) {
     private val keysKey = stringSetPreferencesKey("gemini_api_keys")
     private val activeIndexKey = intPreferencesKey("gemini_active_key_index")
+    private val tavilyApiKey = stringPreferencesKey("tavily_api_key")
 
     val keys: Flow<List<String>> = dataStore.data.map { preferences ->
         preferences[keysKey]?.toList().orEmpty()
@@ -88,6 +89,31 @@ class ApiKeyManager(
     suspend fun clearProviderKey(providerId: String) {
         dataStore.edit { preferences ->
             preferences.remove(providerKey(providerId))
+        }
+    }
+
+    val tavilyKey: Flow<String?> = dataStore.data.map { preferences ->
+        preferences[tavilyApiKey]
+    }
+
+    suspend fun keyForTavily(): String? {
+        return dataStore.data.first()[tavilyApiKey]
+    }
+
+    suspend fun replaceTavilyKey(key: String) {
+        val trimmed = key.trim()
+        dataStore.edit { preferences ->
+            if (trimmed.isEmpty()) {
+                preferences.remove(tavilyApiKey)
+            } else {
+                preferences[tavilyApiKey] = trimmed
+            }
+        }
+    }
+
+    suspend fun clearTavilyKey() {
+        dataStore.edit { preferences ->
+            preferences.remove(tavilyApiKey)
         }
     }
 

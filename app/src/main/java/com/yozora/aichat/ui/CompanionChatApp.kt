@@ -163,7 +163,7 @@ import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private const val APP_VERSION_NAME = "1.0.2"
+private const val APP_VERSION_NAME = "1.0.3"
 
 @Composable
 fun CompanionChatApp(
@@ -189,7 +189,7 @@ fun CompanionChatApp(
             chatError = viewModel.chatError,
             attachedImageUris = viewModel.attachedImageUris,
             webSearchEnabled = viewModel.webSearchEnabled,
-            canUseWebSearch = viewModel.persona.vendor == ApiVendor.Google,
+            canUseWebSearch = viewModel.canUseWebSearch,
             onDraftChange = viewModel::updateDraft,
             onSend = viewModel::sendDraft,
             onAttachImages = viewModel::attachImages,
@@ -265,6 +265,7 @@ fun CompanionChatApp(
                 background = viewModel.background,
                 moreOptions = viewModel.morePersonaOptions,
                 activeApiKeyLabel = viewModel.activeApiKeyLabel,
+                tavilyApiKeyLabel = viewModel.tavilyApiKeyLabel,
                 quotaUsage = viewModel.quotaUsage,
                 dailyRequestLimit = viewModel.dailyRequestLimit,
                 onBack = viewModel::closePersonaSheet,
@@ -281,6 +282,8 @@ fun CompanionChatApp(
                 onToggleMore = viewModel::toggleMorePersonaOptions,
                 onEditApiKey = viewModel::openApiKeyDialog,
                 onClearApiKey = viewModel::clearApiKey,
+                onEditTavilyKey = viewModel::openTavilyApiKeyDialog,
+                onClearTavilyKey = viewModel::clearTavilyApiKey,
                 onDeleteSession = viewModel::deleteActiveSession,
                 onSave = viewModel::savePersona
             )
@@ -289,7 +292,7 @@ fun CompanionChatApp(
 
     if (viewModel.apiKeyDialogVisible) {
         ApiKeyDialog(
-            vendor = viewModel.persona.vendor,
+            title = viewModel.apiKeyDialogTitle,
             value = viewModel.apiKeyDraft,
             onValueChange = viewModel::updateApiKeyDraft,
             onDismiss = viewModel::closeApiKeyDialog,
@@ -468,6 +471,8 @@ private fun ChatScreen(
                     draft = draft,
                     isSending = isSending,
                     attachedImageUris = attachedImageUris,
+                    webSearchEnabled = webSearchEnabled,
+                    canUseWebSearch = canUseWebSearch,
                     onDraftChange = onDraftChange,
                     onSend = {
                         focusManager.clearFocus()
@@ -475,6 +480,7 @@ private fun ChatScreen(
                     },
                     onAttachImage = { attachmentSheetVisible = true },
                     onRemoveAttachedImage = onRemoveAttachedImage,
+                    onWebSearchChange = onWebSearchChange,
                     onOpenImage = onOpenImage
                 )
             }
@@ -1389,7 +1395,7 @@ private fun AttachmentPickerSheet(
                 }
                 if (!webSearchAvailable) {
                     Text(
-                        text = "Gemini grounding only works when API vendor is Google.",
+                        text = "Add a Tavily key and use Google as the API vendor.",
                         color = AppTextSecondary,
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(start = 44.dp, bottom = 4.dp)
@@ -1442,10 +1448,13 @@ private fun ChatInputBar(
     draft: String,
     isSending: Boolean,
     attachedImageUris: List<android.net.Uri>,
+    webSearchEnabled: Boolean,
+    canUseWebSearch: Boolean,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
     onAttachImage: () -> Unit,
     onRemoveAttachedImage: (android.net.Uri) -> Unit,
+    onWebSearchChange: (Boolean) -> Unit,
     onOpenImage: (android.net.Uri) -> Unit
 ) {
     val sendScale by animateFloatAsState(
@@ -1511,6 +1520,27 @@ private fun ChatInputBar(
                         unfocusedContainerColor = Color.Transparent
                     )
                 )
+                IconButton(
+                    onClick = { onWebSearchChange(!webSearchEnabled) },
+                    enabled = canUseWebSearch,
+                    modifier = Modifier
+                        .padding(end = 6.dp)
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (webSearchEnabled) AppAccentDim else Color.Transparent
+                        )
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = "Toggle web search",
+                        tint = when {
+                            webSearchEnabled -> AppAccentSoft
+                            canUseWebSearch -> AppTextPrimary
+                            else -> AppTextSecondary.copy(alpha = 0.45f)
+                        }
+                    )
+                }
                 Button(
                     onClick = onSend,
                     enabled = (draft.isNotBlank() || attachedImageUris.isNotEmpty()) && !isSending,
@@ -1650,6 +1680,7 @@ private fun PersonaSettingsSheet(
     background: ChatBackground,
     moreOptions: Boolean,
     activeApiKeyLabel: String?,
+    tavilyApiKeyLabel: String?,
     quotaUsage: QuotaUsageState,
     dailyRequestLimit: Int?,
     onBack: () -> Unit,
@@ -1666,9 +1697,12 @@ private fun PersonaSettingsSheet(
     onToggleMore: () -> Unit,
     onEditApiKey: () -> Unit,
     onClearApiKey: () -> Unit,
+    onEditTavilyKey: () -> Unit,
+    onClearTavilyKey: () -> Unit,
     onDeleteSession: () -> Unit,
     onSave: () -> Unit
 ) {
+    var instructionPromptExpanded by remember { mutableStateOf(true) }
     val imagePicker = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
         onResult = onAvatarChange
@@ -1731,13 +1765,11 @@ private fun PersonaSettingsSheet(
                 singleLine = true
             )
 
-            PersonaTextField(
-                label = "Instruction Prompt",
+            CollapsibleInstructionPrompt(
                 value = persona.instructionPrompt,
-                onValueChange = onPromptChange,
-                helper = "Shape the tone, boundaries, and role for this persona.",
-                singleLine = false,
-                minLines = 5
+                expanded = instructionPromptExpanded,
+                onExpandedChange = { instructionPromptExpanded = it },
+                onValueChange = onPromptChange
             )
 
             MoreOptions(
@@ -1745,6 +1777,7 @@ private fun PersonaSettingsSheet(
                 persona = persona,
                 background = background,
                 activeApiKeyLabel = activeApiKeyLabel,
+                tavilyApiKeyLabel = tavilyApiKeyLabel,
                 quotaUsage = quotaUsage,
                 dailyRequestLimit = dailyRequestLimit,
                 onToggle = onToggleMore,
@@ -1755,7 +1788,9 @@ private fun PersonaSettingsSheet(
                 onBackgroundChange = onBackgroundChange,
                 onPickCustomBackground = { backgroundPicker.launch(arrayOf("image/*")) },
                 onEditApiKey = onEditApiKey,
-                onClearApiKey = onClearApiKey
+                onClearApiKey = onClearApiKey,
+                onEditTavilyKey = onEditTavilyKey,
+                onClearTavilyKey = onClearTavilyKey
             )
 
             Button(
@@ -1884,22 +1919,25 @@ private fun PersonaTextField(
     minLines: Int = 1
 ) {
     Column(modifier = Modifier.padding(bottom = 18.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = label,
-                color = AppTextPrimary,
-                style = MaterialTheme.typography.labelLarge
-            )
-            counter?.let {
+        val hasHeader = label.isNotBlank() || counter != null
+        if (hasHeader) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = it,
-                    color = AppTextSecondary,
-                    style = MaterialTheme.typography.bodyMedium
+                    text = label,
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.labelLarge
                 )
+                counter?.let {
+                    Text(
+                        text = it,
+                        color = AppTextSecondary,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
         }
         OutlinedTextField(
@@ -1909,7 +1947,7 @@ private fun PersonaTextField(
             minLines = minLines,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 8.dp),
+                .padding(top = if (hasHeader) 8.dp else 0.dp),
             shape = RoundedCornerShape(16.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = AppTextPrimary,
@@ -1927,6 +1965,77 @@ private fun PersonaTextField(
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(top = 8.dp)
         )
+    }
+}
+
+@Composable
+private fun CollapsibleInstructionPrompt(
+    value: String,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onValueChange: (String) -> Unit
+) {
+    Column(modifier = Modifier.padding(bottom = 18.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .clickable { onExpandedChange(!expanded) }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Instruction Prompt",
+                color = AppTextPrimary,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = if (expanded) "Minimize" else "Expand",
+                color = AppAccentSoft,
+                style = MaterialTheme.typography.labelLarge
+            )
+            Icon(
+                imageVector = Icons.Rounded.ExpandMore,
+                contentDescription = null,
+                tint = AppTextSecondary,
+                modifier = Modifier
+                    .padding(start = 4.dp)
+                    .graphicsLayer(rotationZ = if (expanded) 180f else 0f)
+            )
+        }
+
+        AnimatedVisibility(visible = expanded) {
+            PersonaTextField(
+                label = "",
+                value = value,
+                onValueChange = onValueChange,
+                helper = "Shape the tone, boundaries, and role for this persona.",
+                singleLine = false,
+                minLines = 5
+            )
+        }
+
+        AnimatedVisibility(visible = !expanded) {
+            Surface(
+                color = AppSurface,
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, AppStroke),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                    .clickable { onExpandedChange(true) }
+            ) {
+                Text(
+                    text = value.ifBlank { "No instruction prompt yet." },
+                    color = if (value.isBlank()) AppTextSecondary else AppTextPrimary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(14.dp)
+                )
+            }
+        }
     }
 }
 
@@ -1976,6 +2085,7 @@ private fun MoreOptions(
     persona: PersonaUiState,
     background: ChatBackground,
     activeApiKeyLabel: String?,
+    tavilyApiKeyLabel: String?,
     quotaUsage: QuotaUsageState,
     dailyRequestLimit: Int?,
     onToggle: () -> Unit,
@@ -1986,7 +2096,9 @@ private fun MoreOptions(
     onBackgroundChange: (ChatBackground) -> Unit,
     onPickCustomBackground: () -> Unit,
     onEditApiKey: () -> Unit,
-    onClearApiKey: () -> Unit
+    onClearApiKey: () -> Unit,
+    onEditTavilyKey: () -> Unit,
+    onClearTavilyKey: () -> Unit
 ) {
     Surface(
         color = AppSurface,
@@ -2052,10 +2164,13 @@ private fun MoreOptions(
                     )
                     ApiKeySummary(
                         activeApiKeyLabel = activeApiKeyLabel,
+                        tavilyApiKeyLabel = tavilyApiKeyLabel,
                         quotaUsage = quotaUsage,
                         dailyRequestLimit = dailyRequestLimit,
                         onEditApiKey = onEditApiKey,
-                        onClearApiKey = onClearApiKey
+                        onClearApiKey = onClearApiKey,
+                        onEditTavilyKey = onEditTavilyKey,
+                        onClearTavilyKey = onClearTavilyKey
                     )
                 }
             }
@@ -2164,10 +2279,13 @@ private fun ChatBackground.sameChoice(other: ChatBackground): Boolean {
 @Composable
 private fun ApiKeySummary(
     activeApiKeyLabel: String?,
+    tavilyApiKeyLabel: String?,
     quotaUsage: QuotaUsageState,
     dailyRequestLimit: Int?,
     onEditApiKey: () -> Unit,
-    onClearApiKey: () -> Unit
+    onClearApiKey: () -> Unit,
+    onEditTavilyKey: () -> Unit,
+    onClearTavilyKey: () -> Unit
 ) {
     Text(
         text = "API keys",
@@ -2182,23 +2300,68 @@ private fun ApiKeySummary(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
+            ApiKeySlot(
+                label = "Model key",
+                keyLabel = activeApiKeyLabel,
+                emptyText = "No key saved",
+                onEdit = onEditApiKey,
+                onClear = onClearApiKey
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            ApiKeySlot(
+                label = "Tavily search key",
+                keyLabel = tavilyApiKeyLabel,
+                emptyText = "No Tavily key saved",
+                onEdit = onEditTavilyKey,
+                onClear = onClearTavilyKey
+            )
+            QuotaMonitor(
+                usage = quotaUsage,
+                dailyRequestLimit = dailyRequestLimit
+            )
+        }
+    }
+}
+
+@Composable
+private fun ApiKeySlot(
+    label: String,
+    keyLabel: String?,
+    emptyText: String,
+    onEdit: () -> Unit,
+    onClear: () -> Unit
+) {
+    Surface(
+        color = AppBackground.copy(alpha = 0.32f),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, AppStroke),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = label,
+                color = AppTextSecondary,
+                style = MaterialTheme.typography.bodyMedium
+            )
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = activeApiKeyLabel ?: "No key saved",
+                    text = keyLabel ?: emptyText,
                     color = AppTextPrimary,
                     style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier.weight(1f)
                 )
-                if (activeApiKeyLabel != null) {
+                if (keyLabel != null) {
                     Surface(
                         color = AppAccentDim,
                         shape = RoundedCornerShape(999.dp)
                     ) {
                         Text(
-                            text = "Active",
+                            text = "Saved",
                             color = AppAccentSoft,
                             style = MaterialTheme.typography.labelLarge,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
@@ -2207,14 +2370,14 @@ private fun ApiKeySummary(
                 }
             }
             Row(modifier = Modifier.padding(top = 4.dp)) {
-                TextButton(onClick = onEditApiKey) {
+                TextButton(onClick = onEdit) {
                     Text(
-                        text = if (activeApiKeyLabel == null) "Add key" else "Replace key",
+                        text = if (keyLabel == null) "Add key" else "Replace key",
                         color = AppAccentSoft
                     )
                 }
-                if (activeApiKeyLabel != null) {
-                    TextButton(onClick = onClearApiKey) {
+                if (keyLabel != null) {
+                    TextButton(onClick = onClear) {
                         Text(
                             text = "Clear",
                             color = Color(0xFFFFA0AA)
@@ -2222,10 +2385,6 @@ private fun ApiKeySummary(
                     }
                 }
             }
-            QuotaMonitor(
-                usage = quotaUsage,
-                dailyRequestLimit = dailyRequestLimit
-            )
         }
     }
 }
@@ -2463,7 +2622,7 @@ private fun createCameraImageUri(context: android.content.Context): android.net.
 
 @Composable
 private fun ApiKeyDialog(
-    vendor: ApiVendor,
+    title: String,
     value: String,
     onValueChange: (String) -> Unit,
     onDismiss: () -> Unit,
@@ -2474,7 +2633,7 @@ private fun ApiKeyDialog(
         containerColor = AppSurface,
         title = {
             Text(
-                text = "${vendor.label} API key",
+                text = title,
                 color = AppTextPrimary,
                 style = MaterialTheme.typography.titleMedium
             )

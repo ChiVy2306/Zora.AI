@@ -176,7 +176,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 
-private const val APP_VERSION_NAME = "2.0.3"
+private const val APP_VERSION_NAME = "2.1.0"
 
 @Composable
 fun CompanionChatApp(
@@ -307,6 +307,7 @@ fun CompanionChatApp(
                 groupMembers = viewModel.groupMembers,
                 activeMemberId = viewModel.activeMemberId,
                 responseRounds = viewModel.responseRounds,
+                memoryEnabled = viewModel.memoryEnabled,
                 background = viewModel.background,
                 moreOptions = viewModel.morePersonaOptions,
                 activeApiKeyLabel = viewModel.activeApiKeyLabel,
@@ -324,6 +325,7 @@ fun CompanionChatApp(
                 onAddMember = viewModel::addGroupMember,
                 onRemoveMember = viewModel::removeGroupMember,
                 onResponseRoundsChange = viewModel::updateResponseRounds,
+                onMemoryEnabledChange = viewModel::updateMemoryEnabled,
                 onNameChange = viewModel::updatePersonaName,
                 onInstructionModeChange = viewModel::updateInstructionMode,
                 onBeginnerRoleChange = viewModel::updateBeginnerRole,
@@ -373,8 +375,10 @@ fun CompanionChatApp(
         AppSettingsDialog(
             selectedName = viewModel.appNameChoice,
             selectedIcon = viewModel.appIconChoice,
+            globalMemoryBlock = viewModel.globalMemoryBlock,
             onNameChange = viewModel::updateAppName,
             onIconChange = viewModel::updateAppIcon,
+            onGlobalMemoryChange = viewModel::updateGlobalMemoryBlock,
             onDismiss = viewModel::closeAppSettings
         )
     }
@@ -2396,6 +2400,7 @@ private fun PersonaSettingsSheet(
     groupMembers: List<GroupMember>,
     activeMemberId: String,
     responseRounds: Int,
+    memoryEnabled: Boolean,
     background: ChatBackground,
     moreOptions: Boolean,
     activeApiKeyLabel: String?,
@@ -2413,6 +2418,7 @@ private fun PersonaSettingsSheet(
     onAddMember: () -> Unit,
     onRemoveMember: (String) -> Unit,
     onResponseRoundsChange: (Int) -> Unit,
+    onMemoryEnabledChange: (Boolean) -> Unit,
     onNameChange: (String) -> Unit,
     onInstructionModeChange: (InstructionMode) -> Unit,
     onBeginnerRoleChange: (String) -> Unit,
@@ -2526,6 +2532,11 @@ private fun PersonaSettingsSheet(
                 onBeginnerStyleChange = onBeginnerStyleChange,
                 onBeginnerLimitsChange = onBeginnerLimitsChange,
                 onAdvancedPromptChange = onPromptChange
+            )
+
+            SessionMemoryToggle(
+                enabled = memoryEnabled,
+                onEnabledChange = onMemoryEnabledChange
             )
 
             MoreOptions(
@@ -3045,6 +3056,44 @@ private fun CollapsibleInstructionPrompt(
                     modifier = Modifier.padding(14.dp)
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun SessionMemoryToggle(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit
+) {
+    Surface(
+        color = AppSurface,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, AppStroke),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 18.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Read global memory",
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Text(
+                    text = "Let this chat use the shared memory block.",
+                    color = AppTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = onEnabledChange
+            )
         }
     }
 }
@@ -3574,8 +3623,10 @@ private fun formatPacificResetCountdown(): String {
 private fun AppSettingsDialog(
     selectedName: AppNameChoice,
     selectedIcon: AppIconChoice,
+    globalMemoryBlock: String,
     onNameChange: (AppNameChoice) -> Unit,
     onIconChange: (AppIconChoice) -> Unit,
+    onGlobalMemoryChange: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -3590,7 +3641,11 @@ private fun AppSettingsDialog(
             )
         },
         text = {
-            Column {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Text(
                     text = "App name",
                     color = AppTextPrimary,
@@ -3625,6 +3680,42 @@ private fun AppSettingsDialog(
                     choice = AppIconChoice.Waifu,
                     selected = selectedIcon == AppIconChoice.Waifu,
                     onClick = { onIconChange(AppIconChoice.Waifu) }
+                )
+                Spacer(modifier = Modifier.height(18.dp))
+                Text(
+                    text = "Memory",
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                OutlinedTextField(
+                    value = globalMemoryBlock,
+                    onValueChange = onGlobalMemoryChange,
+                    minLines = 5,
+                    maxLines = 9,
+                    placeholder = {
+                        Text(
+                            text = "Things every chat may remember, such as your preferences, recurring roleplay details, or writing style.",
+                            color = AppTextSecondary
+                        )
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = AppTextPrimary,
+                        unfocusedTextColor = AppTextPrimary,
+                        focusedBorderColor = AppAccent.copy(alpha = 0.7f),
+                        unfocusedBorderColor = AppStroke,
+                        cursorColor = AppAccent,
+                        focusedContainerColor = AppSurface2,
+                        unfocusedContainerColor = AppSurface2
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "Sessions only read this when their memory switch is on.",
+                    color = AppTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp)
                 )
             }
         },

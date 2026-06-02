@@ -168,6 +168,7 @@ data class ChatSession(
     val members: List<GroupMember> = listOf(GroupMember(persona = persona)),
     val activeMemberId: String = members.firstOrNull()?.id ?: "",
     val responseRounds: Int = 1,
+    val memoryEnabled: Boolean = true,
     val background: ChatBackground = ChatBackground.DarkMode,
     val preview: String = "No messages yet",
     val updatedAt: String = "Now",
@@ -257,6 +258,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val activeSessionIdKey = stringPreferencesKey("active_session_id_v1")
     private val appIconChoiceKey = stringPreferencesKey("app_icon_choice")
     private val appNameChoiceKey = stringPreferencesKey("app_name_choice")
+    private val globalMemoryKey = stringPreferencesKey("global_memory_block_v1")
     private var restoringState = false
     private val persistMutex = Mutex()
     private val maxAttachedImages = 6
@@ -342,6 +344,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     var appNameChoice by mutableStateOf(AppNameChoice.Zora)
         private set
 
+    var globalMemoryBlock by mutableStateOf("")
+        private set
+
     var quotaUsage by mutableStateOf(QuotaUsageState())
         private set
 
@@ -363,6 +368,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     val responseRounds: Int
         get() = activeSession.responseRounds.coerceIn(1, 3)
+
+    val memoryEnabled: Boolean
+        get() = activeSession.memoryEnabled
 
     val messages: List<ChatMessage>
         get() = activeSession.messages
@@ -413,6 +421,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             restoreLauncherChoice()
+        }
+        viewModelScope.launch {
+            settingsDataStore.data.collectLatest { preferences ->
+                globalMemoryBlock = preferences[globalMemoryKey].orEmpty()
+            }
         }
         viewModelScope.launch {
             apiKeyManager.providerKeys(ApiVendor.entries.map { it.id }).collectLatest { keys ->
@@ -541,7 +554,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val plan = geminiChatService.planToolUse(
                     apiKey = apiKey,
                     vendor = provider,
-                    persona = session.persona.toEntity(sessionId),
+                    persona = session.persona.toEntity(
+                        id = sessionId,
+                        memoryBlock = memoryForSession(session)
+                    ),
                     history = history.toEntities(sessionId),
                     userInput = content,
                     safetyLevel = session.persona.safetyLevel,
@@ -593,7 +609,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         val finalResult = geminiChatService.sendMessage(
                             apiKey = apiKey,
-                            persona = session.persona.toEntity(sessionId),
+                            persona = session.persona.toEntity(
+                                id = sessionId,
+                                memoryBlock = memoryForSession(session)
+                            ),
                             history = history.toEntities(sessionId),
                             userInput = searchContext,
                             vendor = ApiVendor.Google,
@@ -653,7 +672,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             val result = geminiChatService.sendMessage(
                 apiKey = apiKey,
-                persona = session.persona.toEntity(sessionId),
+                persona = session.persona.toEntity(
+                    id = sessionId,
+                    memoryBlock = memoryForSession(session)
+                ),
                 history = history.toEntities(sessionId),
                 userInput = outboundContent,
                 vendor = provider,
@@ -771,7 +793,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         val reply = geminiChatService.sendMessage(
                             apiKey = memberApiKey,
-                            persona = member.persona.toEntity(member.id),
+                            persona = member.persona.toEntity(
+                                id = member.id,
+                                memoryBlock = memoryForSession(session)
+                            ),
                             history = currentHistory.toEntities(sessionId),
                             userInput = memberInput,
                             vendor = member.persona.vendor,
@@ -1201,7 +1226,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
             val finalResult = geminiChatService.sendMessage(
                 apiKey = apiKey,
-                persona = session.persona.toEntity(sessionId),
+                persona = session.persona.toEntity(
+                    id = sessionId,
+                    memoryBlock = memoryForSession(session)
+                ),
                 history = session.messages.toEntities(sessionId),
                 userInput = searchContext,
                 vendor = session.persona.vendor,
@@ -1549,6 +1577,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateMemoryEnabled(value: Boolean) {
+        updateActiveSession { session ->
+            session.copy(memoryEnabled = value)
+        }
+    }
+
+    fun updateGlobalMemoryBlock(value: String) {
+        val nextMemory = value.take(8_000)
+        globalMemoryBlock = nextMemory
+        viewModelScope.launch(Dispatchers.IO) {
+            settingsDataStore.edit { preferences ->
+                preferences[globalMemoryKey] = nextMemory
+            }
+        }
+    }
+
     fun updatePersonaPrompt(value: String) {
         updatePersona { it.copy(instructionPrompt = value) }
     }
@@ -1715,6 +1759,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             sessions[index] = transform(sessions[index])
             persistChatState()
         }
+    }
+
+    private fun memoryForSession(session: ChatSession): String? {
+        val memory = globalMemoryBlock.trim()
+        return memory.takeIf { session.memoryEnabled && it.isNotBlank() }
     }
 
     private fun appendMessage(sessionId: String, message: ChatMessage, preview: String) {
@@ -2423,6 +2472,7 @@ private fun ChatSession.toJson(): JSONObject {
         .put("persona", persona.toJson())
         .put("activeMemberId", activeMemberId)
         .put("responseRounds", responseRounds)
+        .put("memoryEnabled", memoryEnabled)
         .put(
             "members",
             JSONArray().apply {
@@ -2467,6 +2517,7 @@ private fun JSONObject.toChatSession(): ChatSession {
         members = restoredMembers,
         activeMemberId = activeMemberId,
         responseRounds = optInt("responseRounds", 1).coerceIn(1, 3),
+        memoryEnabled = if (has("memoryEnabled")) optBoolean("memoryEnabled", true) else true,
         background = optJSONObject("background")?.toChatBackground() ?: ChatBackground.DarkMode,
         preview = optString("preview").ifBlank { previewForRestored(restoredMessages) },
         updatedAt = optString("updatedAt").ifBlank { "Now" },
@@ -2649,12 +2700,21 @@ private fun loadMasterPrompt(application: Application): String {
     }.getOrNull()?.takeIf { it.isNotBlank() }.orEmpty()
 }
 
-private fun PersonaUiState.toEntity(id: String): PersonaEntity {
+private fun PersonaUiState.toEntity(id: String, memoryBlock: String? = null): PersonaEntity {
+    val basePrompt = effectiveInstructionPrompt()
+    val promptWithMemory = if (memoryBlock.isNullOrBlank()) {
+        basePrompt
+    } else {
+        listOf(
+            basePrompt,
+            "Global memory shared by the user across sessions. Treat these as stable user facts/preferences unless the current message corrects them:\n${memoryBlock.trim()}"
+        ).joinToString("\n\n")
+    }
     return PersonaEntity(
         id = id,
         name = displayName,
         avatarUri = avatarUri?.toString(),
-        systemPrompt = effectiveInstructionPrompt(),
+        systemPrompt = promptWithMemory,
         model = model,
         temperature = temperature
     )

@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         TtsAudioCacheEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -31,7 +31,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "zora.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { instance = it }
             }
@@ -73,6 +73,14 @@ abstract class AppDatabase : RoomDatabase() {
                     `index_tts_audio_cache_messageId_sourceHash_provider_voiceId_modelId`
                     ON `tts_audio_cache` (`messageId`, `sourceHash`, `provider`, `voiceId`, `modelId`)
                     """.trimIndent()
+                )
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `sessions` ADD COLUMN `memoryEnabled` INTEGER NOT NULL DEFAULT 1"
                 )
             }
         }

@@ -21,6 +21,7 @@ data class ChatSessionEntity(
     val personaJson: String,
     val activeMemberId: String,
     val responseRounds: Int,
+    val memoryEnabled: Boolean = true,
     val backgroundJson: String,
     val preview: String,
     val updatedAt: String,

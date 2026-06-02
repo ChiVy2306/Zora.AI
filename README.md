@@ -6,7 +6,7 @@ Created by Phan Chi Vy.
 
 ## Current Version
 
-`2.0.3`
+`2.1.0`
 
 The app includes two build flavors:
 
@@ -20,6 +20,7 @@ The visible app name can also be switched from inside the app settings.
 - Custom AI personas with avatar, background, instruction prompt, and beginner/advanced persona modes.
 - Solo or group sessions with 1-4 AI personas.
 - Local chat history using Room database.
+- Local global memory block with per-session read toggle.
 - Per-session export and import.
 - Message actions: copy, retry, and edit user messages.
 - Markdown and LaTeX rendering support.
@@ -33,6 +34,14 @@ The visible app name can also be switched from inside the app settings.
 - Multiple API vendor options, including Google, OpenAI, Claude, Grok, and Mistral-compatible flows.
 - App icon presets and app name presets.
 
+## Version 2.1.0
+
+- Added a local global memory block in app settings.
+- Added a per-session toggle so each chat can choose whether it reads global memory.
+- Memory is injected as model context only when enabled for that session.
+- Added Room migration support for the session memory toggle.
+- Added ElevenLabs TTS support with local audio caching.
+
 ## Privacy Model
 
 The repository does not include private API keys or a private master prompt.
@@ -42,6 +51,7 @@ Local-only data:
 - API keys entered by the user.
 - Chat sessions and messages.
 - Persona settings.
+- Global memory text and each session's memory toggle.
 - Cached TTS audio generated from AI messages.
 - App preferences.
 - Local quota counters.

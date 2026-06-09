@@ -16,6 +16,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.yozora.aichat.data.SkillRepository
 import com.yozora.aichat.data.datastore.ApiKeyManager
 import com.yozora.aichat.data.datastore.settingsDataStore
 import com.yozora.aichat.data.db.ChatRepository
@@ -26,10 +27,15 @@ import com.yozora.aichat.data.remote.ElevenLabsTtsException
 import com.yozora.aichat.data.remote.ElevenLabsTtsRepository
 import com.yozora.aichat.data.remote.GeminiChatReply
 import com.yozora.aichat.data.remote.GeminiChatService
+import com.yozora.aichat.data.remote.GeminiLiveCallConfig
+import com.yozora.aichat.data.remote.GeminiLiveCallService
+import com.yozora.aichat.data.remote.GeminiToolCall
 import com.yozora.aichat.data.remote.Rule34ImageRepository
+import com.yozora.aichat.data.remote.ScreenShareForegroundService
 import com.yozora.aichat.data.remote.TavilyRepository
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
@@ -59,6 +65,13 @@ data class ChatMessage(
     val imageUri: Uri?
         get() = imageUris.firstOrNull()
 }
+
+data class LiveCallTranscriptLine(
+    val id: String = UUID.randomUUID().toString(),
+    val role: String,
+    val text: String,
+    val streaming: Boolean = false
+)
 
 enum class ApiVendor(
     val id: String,
@@ -105,6 +118,16 @@ enum class SafetyLevel(
     Low("Low"),
     Medium("Medium"),
     High("High")
+}
+
+enum class GeminiThinkingEffort(
+    val label: String,
+    val thinkingBudget: Int
+) {
+    Minimal("Minimal", 256),
+    Low("Low", 1024),
+    Medium("Medium", 4096),
+    High("High", 8192)
 }
 
 enum class InstructionMode(
@@ -157,18 +180,56 @@ enum class AppNameChoice(
     SanLoVerse("sanloverse", "SanLoVerse (SLV)")
 }
 
+enum class GeminiLiveVoice(
+    val id: String,
+    val label: String,
+    val description: String
+) {
+    Aoede("aoede", "Aoede", "Clear, melodic, and engaging."),
+    Kore("kore", "Kore", "Calm, professional, and slightly firm."),
+    Leda("leda", "Leda", "Warm and conversational."),
+    Glow("glow", "Glow", "Smooth and natural."),
+    Puck("puck", "Puck", "Upbeat, energetic, and conversational."),
+    Charon("charon", "Charon", "Calm, reassuring, and professional."),
+    Fenrir("fenrir", "Fenrir", "Deep, slightly raspy, and conversational."),
+    Zephyr("zephyr", "Zephyr", "Smooth, clear, and relaxed."),
+    Flare("flare", "Flare", "Dynamic and engaging.")
+}
+
+enum class VoiceCallCameraFacing {
+    Front,
+    Back
+}
+
 data class GroupMember(
     val id: String = UUID.randomUUID().toString(),
     val persona: PersonaUiState = PersonaUiState()
 )
 
+data class ProjectUiState(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "New project",
+    val description: String = "",
+    val instruction: String = "",
+    val updatedAt: String = "Now"
+)
+
 data class ChatSession(
     val id: String = UUID.randomUUID().toString(),
+    val title: String = "",
+    val headerAvatarUri: Uri? = null,
+    val headerAvatarScale: Float = 1.0f,
+    val headerAvatarOffsetX: Float = 0f,
+    val headerAvatarOffsetY: Float = 0f,
     val persona: PersonaUiState = PersonaUiState(),
     val members: List<GroupMember> = listOf(GroupMember(persona = persona)),
     val activeMemberId: String = members.firstOrNull()?.id ?: "",
     val responseRounds: Int = 1,
     val memoryEnabled: Boolean = true,
+    val storyLore: String = "",
+    val levelSystemEnabled: Boolean = false,
+    val levelXp: Int = 0,
+    val projectId: String? = null,
     val background: ChatBackground = ChatBackground.DarkMode,
     val preview: String = "No messages yet",
     val updatedAt: String = "Now",
@@ -197,6 +258,7 @@ data class PersonaUiState(
     val vendor: ApiVendor = ApiVendor.Google,
     val model: String = "gemini-3.1-flash-lite",
     val safetyLevel: SafetyLevel = SafetyLevel.None,
+    val thinkingEffort: GeminiThinkingEffort = GeminiThinkingEffort.Low,
     val temperature: Float = 1.0f,
     val avatarUri: Uri? = null,
     val avatarScale: Float = 1.0f,
@@ -213,6 +275,22 @@ data class QuotaUsageState(
     val lastResponseTokens: Int = 0,
     val lastTotalTokens: Int = 0
 )
+
+data class SessionLevelState(
+    val level: Int,
+    val xp: Int,
+    val currentLevelXp: Int,
+    val nextLevelXp: Int,
+    val label: String
+) {
+    val progress: Float
+        get() = if (level >= 10 || nextLevelXp <= currentLevelXp) {
+            1f
+        } else {
+            ((xp - currentLevelXp).toFloat() / (nextLevelXp - currentLevelXp))
+                .coerceIn(0f, 1f)
+        }
+}
 
 data class TtsPreviewState(
     val messageId: String,
@@ -248,7 +326,9 @@ private enum class ApiKeyDialogTarget {
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val settingsDataStore = application.settingsDataStore
     private val apiKeyManager = ApiKeyManager(settingsDataStore)
-    private val geminiChatService = GeminiChatService()
+    private val skillRepository = SkillRepository.get(application)
+    private val geminiChatService = GeminiChatService(skillRepository)
+    private val geminiLiveCallService = GeminiLiveCallService()
     private val tavilyRepository = TavilyRepository()
     private val rule34ImageRepository = Rule34ImageRepository()
     private val elevenLabsTtsRepository = ElevenLabsTtsRepository()
@@ -256,14 +336,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val masterSystemPrompt = loadMasterPrompt(application)
     private val chatStateKey = stringPreferencesKey("chat_state_v1")
     private val activeSessionIdKey = stringPreferencesKey("active_session_id_v1")
+    private val projectStateKey = stringPreferencesKey("project_state_v1")
     private val appIconChoiceKey = stringPreferencesKey("app_icon_choice")
     private val appNameChoiceKey = stringPreferencesKey("app_name_choice")
+    private val geminiLiveVoiceKey = stringPreferencesKey("gemini_live_voice")
     private val globalMemoryKey = stringPreferencesKey("global_memory_block_v1")
     private var restoringState = false
     private val persistMutex = Mutex()
-    private val maxAttachedImages = 6
+    private val maxAttachedImages = 12
     private var pendingTtsRequest: PendingTtsRequest? = null
     private var mediaPlayer: MediaPlayer? = null
+    private var voiceCallSessionId: String? = null
+    private var voiceCallModelMessageId: String? = null
+    private var currentVoiceCallModelLineId: String? = null
+    private var currentVoiceCallModelText = ""
+    private var voiceCallVisualReconnectPending = false
+    private var lastVoiceCallVisualReconnectAt = 0L
 
     var draft by mutableStateOf("")
         private set
@@ -344,6 +432,34 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     var appNameChoice by mutableStateOf(AppNameChoice.Zora)
         private set
 
+    var voiceCallActive by mutableStateOf(false)
+        private set
+
+    var voiceCallStatus by mutableStateOf("Idle")
+        private set
+
+    var voiceCallError by mutableStateOf<String?>(null)
+        private set
+
+    val geminiLiveModelId: String = GeminiLiveCallService.DEFAULT_MODEL_ID
+
+    var selectedGeminiLiveVoice by mutableStateOf(GeminiLiveVoice.Aoede)
+        private set
+
+    var voiceCallMuted by mutableStateOf(false)
+        private set
+
+    var voiceCallVideoEnabled by mutableStateOf(false)
+        private set
+
+    var voiceCallCameraFacing by mutableStateOf(VoiceCallCameraFacing.Front)
+        private set
+
+    var voiceCallScreenShareEnabled by mutableStateOf(false)
+        private set
+
+    val voiceCallTranscriptLines = mutableStateListOf<LiveCallTranscriptLine>()
+
     var globalMemoryBlock by mutableStateOf("")
         private set
 
@@ -354,14 +470,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         ChatSession()
     )
 
+    val projects = mutableStateListOf<ProjectUiState>()
+
     var activeSessionId by mutableStateOf(sessions.first().id)
         private set
+
+    val activeProject: ProjectUiState?
+        get() = activeSession.projectId?.let { id -> projects.firstOrNull { it.id == id } }
 
     val persona: PersonaUiState
         get() = activeGroupMember.persona
 
     val groupMembers: List<GroupMember>
         get() = activeSession.normalizedMembers()
+
+    val sessionHeaderName: String
+        get() = activeSession.title
+
+    val sessionHeaderAvatarUri: Uri?
+        get() = activeSession.headerAvatarUri
+
+    val sessionHeaderAvatarScale: Float
+        get() = activeSession.headerAvatarScale
+
+    val sessionHeaderAvatarOffsetX: Float
+        get() = activeSession.headerAvatarOffsetX
+
+    val sessionHeaderAvatarOffsetY: Float
+        get() = activeSession.headerAvatarOffsetY
+
+    val showSessionHeaderControls: Boolean
+        get() = activeSession.normalizedMembers().size > 1
 
     val activeMemberId: String
         get() = activeGroupMember.id
@@ -371,6 +510,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     val memoryEnabled: Boolean
         get() = activeSession.memoryEnabled
+
+    val storyLore: String
+        get() = activeSession.storyLore
+
+    val levelSystemEnabled: Boolean
+        get() = activeSession.levelSystemEnabled
+
+    val levelXp: Int
+        get() = activeSession.levelXp.coerceIn(0, MAX_LEVEL_XP)
 
     val messages: List<ChatMessage>
         get() = activeSession.messages
@@ -417,10 +565,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
+            restoreProjects()
             restoreChatState()
         }
         viewModelScope.launch {
             restoreLauncherChoice()
+        }
+        viewModelScope.launch {
+            restoreGeminiLiveVoice()
         }
         viewModelScope.launch {
             settingsDataStore.data.collectLatest { preferences ->
@@ -505,6 +657,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         message = ChatMessage(role = "user", content = content),
                         preview = content.take(72)
                     )
+                    awardTextMessageXp(sessionId, message)
                     appendMessage(
                         sessionId = sessionId,
                         message = ChatMessage(role = "model", content = localReply),
@@ -544,6 +697,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 message = userMessage,
                 preview = if (imageUris.isEmpty()) content.take(72) else "[${imageUris.size} image] ${content.take(58)}"
             )
+            awardTextMessageXp(sessionId, message)
 
             val enabledTools = enabledGeminiTools(
                 provider = provider,
@@ -551,20 +705,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 message = content
             )
             if (enabledTools.isNotEmpty()) {
-                val plan = geminiChatService.planToolUse(
-                    apiKey = apiKey,
-                    vendor = provider,
-                    persona = session.persona.toEntity(
-                        id = sessionId,
-                        memoryBlock = memoryForSession(session)
-                    ),
-                    history = history.toEntities(sessionId),
-                    userInput = content,
-                    safetyLevel = session.persona.safetyLevel,
-                    images = loadedImages,
-                    enabledTools = enabledTools,
-                    masterPrompt = masterSystemPrompt
-                ).getOrElse { throwable ->
+                val plan = retryTemporaryUnavailable {
+                    geminiChatService.planToolUse(
+                        apiKey = apiKey,
+                        vendor = provider,
+                        persona = personaEntityForSession(session, sessionId),
+                        history = history.toEntities(sessionId),
+                        userInput = content,
+                        safetyLevel = session.persona.safetyLevel,
+                        images = loadedImages,
+                        enabledTools = enabledTools,
+                        masterPrompt = masterSystemPrompt
+                    )
+                }.getOrElse { throwable ->
                     if (provider != ApiVendor.Google && enabledTools.isNotEmpty()) {
                         runProviderToolFallback(
                             enabledTools = enabledTools,
@@ -585,13 +738,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 recordUsage(plan.toReply())
                 val toolCall = plan.functionCall
                 if (toolCall == null) {
-                    sendingSessionId = null
-                    val cleanResponse = cleanModelResponse(plan.text, session.persona.displayName)
-                    appendMessage(
-                        sessionId = sessionId,
-                        message = ChatMessage(role = "model", content = cleanResponse),
-                        preview = cleanResponse.take(72)
+                    val parsedToolCall = parseTextToolCall(
+                        raw = plan.text,
+                        enabledTools = enabledTools,
+                        currentMessage = content
                     )
+                    if (parsedToolCall != null && executeToolCall(
+                            toolCall = parsedToolCall,
+                            sessionId = sessionId,
+                            session = session,
+                            history = history,
+                            content = content,
+                            apiKey = apiKey,
+                            loadedImages = loadedImages,
+                            userMessage = userMessage
+                        )
+                    ) {
+                        sendingSessionId = null
+                        return@launch
+                    }
+                    appendModelResponseOrRecover(
+                        sessionId = sessionId,
+                        session = session,
+                        rawText = plan.text
+                    )
+                    sendingSessionId = null
                     return@launch
                 }
 
@@ -607,34 +778,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 query = query
                             ) ?: content
                         }
-                        val finalResult = geminiChatService.sendMessage(
-                            apiKey = apiKey,
-                            persona = session.persona.toEntity(
-                                id = sessionId,
-                                memoryBlock = memoryForSession(session)
-                            ),
-                            history = history.toEntities(sessionId),
-                            userInput = searchContext,
-                            vendor = ApiVendor.Google,
-                            safetyLevel = session.persona.safetyLevel,
-                            images = loadedImages,
-                            webSearchEnabled = false,
-                            masterPrompt = masterSystemPrompt
+                        val finalResult = retryTemporaryUnavailable {
+                            geminiChatService.sendMessage(
+                                apiKey = apiKey,
+                                persona = personaEntityForSession(session, sessionId),
+                                history = history.toEntities(sessionId),
+                                userInput = searchContext,
+                                vendor = ApiVendor.Google,
+                                safetyLevel = session.persona.safetyLevel,
+                                images = loadedImages,
+                                webSearchEnabled = false,
+                                masterPrompt = masterSystemPrompt
+                            )
+                        }
+                        val reply = finalResult.getOrElse { throwable ->
+                            sendingSessionId = null
+                            handleSendFailure(throwable, userMessage.id)
+                            return@launch
+                        }
+                        recordUsage(reply)
+                        appendModelResponseOrRecover(
+                            sessionId = sessionId,
+                            session = session,
+                            rawText = reply.text
                         )
                         sendingSessionId = null
-                        finalResult
-                            .onSuccess { reply ->
-                                recordUsage(reply)
-                                val cleanResponse = cleanModelResponse(reply.text, session.persona.displayName)
-                                appendMessage(
-                                    sessionId = sessionId,
-                                    message = ChatMessage(role = "model", content = cleanResponse),
-                                    preview = cleanResponse.take(72)
-                                )
-                            }
-                            .onFailure { throwable ->
-                                handleSendFailure(throwable, userMessage.id)
-                            }
                     }
 
                     "anime_image_search" -> {
@@ -670,35 +838,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 content = content
             )
 
-            val result = geminiChatService.sendMessage(
-                apiKey = apiKey,
-                persona = session.persona.toEntity(
-                    id = sessionId,
-                    memoryBlock = memoryForSession(session)
-                ),
-                history = history.toEntities(sessionId),
-                userInput = outboundContent,
-                vendor = provider,
-                safetyLevel = session.persona.safetyLevel,
-                images = loadedImages,
-                webSearchEnabled = false,
-                masterPrompt = masterSystemPrompt
-            )
+            val result = retryTemporaryUnavailable {
+                geminiChatService.sendMessage(
+                    apiKey = apiKey,
+                    persona = personaEntityForSession(session, sessionId),
+                    history = history.toEntities(sessionId),
+                    userInput = outboundContent,
+                    vendor = provider,
+                    safetyLevel = session.persona.safetyLevel,
+                    images = loadedImages,
+                    webSearchEnabled = false,
+                    masterPrompt = masterSystemPrompt
+                )
+            }
 
+            val reply = result.getOrElse { throwable ->
+                sendingSessionId = null
+                handleSendFailure(throwable, userMessage.id)
+                return@launch
+            }
+            recordUsage(reply)
+            appendModelResponseOrRecover(
+                sessionId = sessionId,
+                session = session,
+                rawText = reply.text
+            )
             sendingSessionId = null
-            result
-                .onSuccess { reply ->
-                    recordUsage(reply)
-                    val cleanResponse = cleanModelResponse(reply.text, session.persona.displayName)
-                    appendMessage(
-                        sessionId = sessionId,
-                        message = ChatMessage(role = "model", content = cleanResponse),
-                        preview = cleanResponse.take(72)
-                    )
-                }
-                .onFailure { throwable ->
-                    handleSendFailure(throwable, userMessage.id)
-                }
         }
     }
 
@@ -723,6 +888,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     attachedImageUris = emptyList()
                     chatError = null
                     appendMessage(sessionId, ChatMessage(role = "user", content = content), content.take(72))
+                    awardTextMessageXp(sessionId, cleanMessage)
                     appendMessage(sessionId, ChatMessage(role = "model", content = localReply), localReply.take(72))
                     return@launch
                 }
@@ -768,6 +934,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 message = userMessage,
                 preview = if (imageUris.isEmpty()) content.take(72) else "[${imageUris.size} image] ${content.take(58)}"
             )
+            awardTextMessageXp(sessionId, cleanMessage)
 
             val toolAugmentedContent = tavilyAugmentedInput(
                 enabled = webSearchEnabled && shouldOfferWebSearch(normalizedMessage),
@@ -776,10 +943,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             runCatching {
-                val turnSpeakers = groupTurnSpeakers(
-                    members = members,
-                    turns = session.responseRounds.coerceIn(1, 3)
-                )
+                val responseTurns = session.responseRounds.coerceIn(1, 3)
+                val taggedSpeakers = taggedMembersForMessage(content, members)
+                val turnSpeakers = if (taggedSpeakers.isNotEmpty()) {
+                    taggedSpeakers.take(responseTurns)
+                } else {
+                    groupTurnSpeakers(
+                        members = members,
+                        turns = responseTurns
+                    )
+                }
                 turnSpeakers.forEachIndexed { turnIndex, member ->
                         val memberApiKey = apiKeyManager.keyForProvider(member.persona.vendor.id)
                             ?: error("Missing ${member.persona.vendor.label} key.")
@@ -791,31 +964,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             turn = turnIndex + 1,
                             totalTurns = turnSpeakers.size
                         )
-                        val reply = geminiChatService.sendMessage(
-                            apiKey = memberApiKey,
-                            persona = member.persona.toEntity(
-                                id = member.id,
-                                memoryBlock = memoryForSession(session)
-                            ),
-                            history = currentHistory.toEntities(sessionId),
-                            userInput = memberInput,
-                            vendor = member.persona.vendor,
-                            safetyLevel = member.persona.safetyLevel,
-                            images = if (turnIndex == 0) loadedImages else emptyList(),
-                            webSearchEnabled = false,
-                            masterPrompt = masterSystemPrompt
-                        ).getOrThrow()
+                        val reply = retryTemporaryUnavailable {
+                            geminiChatService.sendMessage(
+                                apiKey = memberApiKey,
+                                persona = personaEntityForSession(
+                                    session = session,
+                                    id = member.id,
+                                    persona = member.persona
+                                ),
+                                history = currentHistory.toEntities(sessionId),
+                                userInput = memberInput,
+                                vendor = member.persona.vendor,
+                                safetyLevel = member.persona.safetyLevel,
+                                images = if (turnIndex == 0) loadedImages else emptyList(),
+                                webSearchEnabled = false,
+                                masterPrompt = masterSystemPrompt
+                            )
+                        }.getOrThrow()
                         recordUsage(reply)
-                        val cleanResponse = cleanModelResponse(reply.text, member.persona.displayName)
-                        appendMessage(
+                        appendModelResponseOrRecover(
                             sessionId = sessionId,
-                            message = ChatMessage(
-                                role = "model",
-                                content = cleanResponse,
-                                speakerId = member.id,
-                                speakerName = member.persona.displayName
-                            ),
-                            preview = "${member.persona.displayName}: ${cleanResponse.take(56)}"
+                            session = session,
+                            rawText = reply.text,
+                            speaker = member
                         )
                 }
             }.onFailure { throwable ->
@@ -1104,6 +1275,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             message = userMessage,
             preview = cleanRequest.take(72)
         )
+        awardTextMessageXp(sessionId, cleanRequest)
         appendMessage(
             sessionId = sessionId,
             message = loadingMessage,
@@ -1224,34 +1396,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 provider = session.persona.vendor,
                 content = content
             )
-            val finalResult = geminiChatService.sendMessage(
-                apiKey = apiKey,
-                persona = session.persona.toEntity(
-                    id = sessionId,
-                    memoryBlock = memoryForSession(session)
-                ),
-                history = session.messages.toEntities(sessionId),
-                userInput = searchContext,
-                vendor = session.persona.vendor,
-                safetyLevel = session.persona.safetyLevel,
-                images = loadedImages,
-                webSearchEnabled = false,
-                masterPrompt = masterSystemPrompt
+            val finalResult = retryTemporaryUnavailable {
+                geminiChatService.sendMessage(
+                    apiKey = apiKey,
+                    persona = personaEntityForSession(session, sessionId),
+                    history = session.messages.toEntities(sessionId),
+                    userInput = searchContext,
+                    vendor = session.persona.vendor,
+                    safetyLevel = session.persona.safetyLevel,
+                    images = loadedImages,
+                    webSearchEnabled = false,
+                    masterPrompt = masterSystemPrompt
+                )
+            }
+            val reply = finalResult.getOrElse { throwable ->
+                sendingSessionId = null
+                handleSendFailure(throwable, userMessage.id)
+                return
+            }
+            recordUsage(reply)
+            appendModelResponseOrRecover(
+                sessionId = sessionId,
+                session = session,
+                rawText = reply.text
             )
             sendingSessionId = null
-            finalResult
-                .onSuccess { reply ->
-                    recordUsage(reply)
-                    val cleanResponse = cleanModelResponse(reply.text, session.persona.displayName)
-                    appendMessage(
-                        sessionId = sessionId,
-                        message = ChatMessage(role = "model", content = cleanResponse),
-                        preview = cleanResponse.take(72)
-                    )
-                }
-                .onFailure { throwable ->
-                    handleSendFailure(throwable, userMessage.id)
-                }
             return
         }
 
@@ -1286,6 +1455,442 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         sessionDrawerVisible = false
     }
 
+    fun openVoiceCall() {
+        if (persona.vendor != ApiVendor.Google) {
+            chatError = "Voice calls use Gemini only. Switch this persona to Google."
+            return
+        }
+        sessionDrawerVisible = false
+        personaSheetVisible = false
+        appSettingsVisible = false
+        voiceCallMuted = false
+        voiceCallVideoEnabled = false
+        voiceCallCameraFacing = VoiceCallCameraFacing.Front
+        voiceCallScreenShareEnabled = false
+        voiceCallSessionId = activeSessionId
+        voiceCallModelMessageId = null
+        currentVoiceCallModelLineId = null
+        currentVoiceCallModelText = ""
+        voiceCallVisualReconnectPending = false
+        lastVoiceCallVisualReconnectAt = 0L
+        voiceCallTranscriptLines.clear()
+        voiceCallError = null
+        voiceCallActive = true
+        startGeminiLiveCall()
+    }
+
+    fun closeVoiceCall() {
+        geminiLiveCallService.stop()
+        ScreenShareForegroundService.stop(getApplication())
+        completeVoiceCallModelTurn(persist = false)
+        persistChatState()
+        voiceCallActive = false
+        voiceCallStatus = "Idle"
+        voiceCallSessionId = null
+        voiceCallModelMessageId = null
+        currentVoiceCallModelLineId = null
+        currentVoiceCallModelText = ""
+        voiceCallVisualReconnectPending = false
+        voiceCallVideoEnabled = false
+        voiceCallCameraFacing = VoiceCallCameraFacing.Front
+        voiceCallScreenShareEnabled = false
+        voiceCallError = null
+    }
+
+    fun toggleVoiceCallMute() {
+        voiceCallMuted = !voiceCallMuted
+        geminiLiveCallService.setMuted(voiceCallMuted)
+        voiceCallStatus = if (voiceCallMuted) "Muted" else "Listening..."
+    }
+
+    fun enableVoiceCallVideo() {
+        if (!voiceCallActive) return
+        if (voiceCallScreenShareEnabled) {
+            ScreenShareForegroundService.stop(getApplication())
+            voiceCallScreenShareEnabled = false
+        }
+        voiceCallVideoEnabled = true
+    }
+
+    fun disableVoiceCallVideo() {
+        voiceCallVideoEnabled = false
+    }
+
+    fun switchVoiceCallCamera() {
+        if (!voiceCallActive || !voiceCallVideoEnabled) return
+        voiceCallCameraFacing = when (voiceCallCameraFacing) {
+            VoiceCallCameraFacing.Front -> VoiceCallCameraFacing.Back
+            VoiceCallCameraFacing.Back -> VoiceCallCameraFacing.Front
+        }
+    }
+
+    fun startVoiceCallScreenShare(resultCode: Int, resultData: Intent) {
+        if (!voiceCallActive) return
+        voiceCallVideoEnabled = false
+        voiceCallScreenShareEnabled = true
+        ScreenShareForegroundService.start(
+            context = getApplication(),
+            resultCode = resultCode,
+            resultData = resultData,
+            onFrame = geminiLiveCallService::sendVideoFrame,
+            onError = { message ->
+                viewModelScope.launch(Dispatchers.Main) {
+                    voiceCallScreenShareEnabled = false
+                    voiceCallError = message
+                }
+            },
+            onStopped = {
+                viewModelScope.launch(Dispatchers.Main) {
+                    voiceCallScreenShareEnabled = false
+                }
+            }
+        )
+    }
+
+    fun stopVoiceCallScreenShare() {
+        ScreenShareForegroundService.stop(getApplication())
+        voiceCallScreenShareEnabled = false
+    }
+
+    fun sendVoiceCallVideoFrame(jpegBytes: ByteArray) {
+        if (voiceCallVideoEnabled && voiceCallActive) {
+            geminiLiveCallService.sendVideoFrame(jpegBytes)
+        }
+    }
+
+    fun retryVoiceCall() {
+        if (!voiceCallActive) return
+        voiceCallError = null
+        completeVoiceCallModelTurn()
+        startGeminiLiveCall()
+    }
+
+    fun updateGeminiLiveVoice(voice: GeminiLiveVoice) {
+        selectedGeminiLiveVoice = voice
+        viewModelScope.launch {
+            settingsDataStore.edit { preferences ->
+                preferences[geminiLiveVoiceKey] = voice.id
+            }
+        }
+        if (voiceCallActive) {
+            completeVoiceCallModelTurn()
+            startGeminiLiveCall()
+        }
+    }
+
+    fun handleVoicePermissionDenied() {
+        chatError = "Microphone permission is required for voice calls."
+    }
+
+    private fun startGeminiLiveCall() {
+        voiceCallStatus = "Connecting..."
+        voiceCallError = null
+        viewModelScope.launch {
+            val apiKey = apiKeyManager.keyForProvider(ApiVendor.Google.id)
+            if (apiKey.isNullOrBlank()) {
+                voiceCallActive = false
+                voiceCallStatus = "Idle"
+                voiceCallSessionId = null
+                openApiKeyDialog()
+                chatError = "Add a Google API key first."
+                return@launch
+            }
+            val callSessionId = voiceCallSessionId ?: activeSessionId.also {
+                voiceCallSessionId = it
+            }
+            val session = sessions.firstOrNull { it.id == callSessionId } ?: activeSession
+            val callMembers = session.normalizedMembers()
+            val callMember = callMembers.firstOrNull { it.id == session.activeMemberId }
+                ?: callMembers.first()
+            val personaEntity = personaEntityForSession(
+                session = session,
+                id = callMember.id,
+                persona = callMember.persona
+            )
+            val systemInstruction = listOf(
+                masterSystemPrompt.takeIf { it.isNotBlank() },
+                skillRepository.combinedContent.takeIf { it.isNotBlank() },
+                personaEntity.systemPrompt
+            ).filterNotNull().joinToString("\n\n---\n\n")
+            val callSpeakerId = callMember.id
+            val callSpeakerName = personaEntity.name
+            geminiLiveCallService.start(
+                config = GeminiLiveCallConfig(
+                    apiKey = apiKey,
+                    modelId = geminiLiveModelId,
+                    systemInstruction = systemInstruction,
+                    voiceName = selectedGeminiLiveVoice.label,
+                    priorConversationContext = liveConversationContext(session)
+                ),
+                onStatus = { status ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        voiceCallStatus = if (voiceCallMuted && status == "Listening...") "Muted" else status
+                        if (
+                            status.startsWith("Connected") ||
+                            status == "Listening..." ||
+                            status == "Speaking..."
+                        ) {
+                            voiceCallError = null
+                        }
+                    }
+                },
+                onError = { message ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        if (message.isRecoverableLiveGoAway()) {
+                            reconnectGeminiLiveCallSilently()
+                            return@launch
+                        }
+                        voiceCallStatus = "Connection lost"
+                        voiceCallError = when {
+                            message.contains("ping", ignoreCase = true) ->
+                                "The live connection timed out."
+                            message.contains("timeout", ignoreCase = true) ->
+                                "Gemini Live did not respond in time."
+                            else -> message.take(180)
+                        }
+                    }
+                },
+                onUserTranscript = { transcript ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        appendVoiceCallUserTranscript(
+                            sessionId = callSessionId,
+                            transcript = transcript
+                        )
+                    }
+                },
+                onModelTranscriptDelta = { transcript ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        appendVoiceCallModelTranscript(
+                            sessionId = callSessionId,
+                            transcript = transcript,
+                            speakerId = callSpeakerId,
+                            speakerName = callSpeakerName
+                        )
+                    }
+                },
+                onModelTurnComplete = {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        completeVoiceCallModelTurn()
+                    }
+                }
+            )
+        }
+    }
+
+    private fun reconnectGeminiLiveCallSilently() {
+        if (!voiceCallActive || voiceCallVisualReconnectPending) return
+        voiceCallVisualReconnectPending = true
+        voiceCallStatus = "Reconnecting..."
+        voiceCallError = null
+        completeVoiceCallModelTurn()
+        geminiLiveCallService.stop()
+
+        viewModelScope.launch {
+            delay(450L)
+            if (voiceCallActive) {
+                startGeminiLiveCall()
+            }
+            delay(1_200L)
+            voiceCallVisualReconnectPending = false
+        }
+    }
+
+    private fun appendVoiceCallUserTranscript(
+        sessionId: String,
+        transcript: String
+    ) {
+        val cleanTranscript = transcript.trim()
+        if (cleanTranscript.isBlank()) return
+        val lastLine = voiceCallTranscriptLines.lastOrNull()
+        if (lastLine?.role == "user" && lastLine.text == cleanTranscript) return
+
+        voiceCallTranscriptLines += LiveCallTranscriptLine(
+            role = "user",
+            text = cleanTranscript
+        )
+        appendVoiceCallMessage(
+            sessionId = sessionId,
+            message = ChatMessage(
+                role = "user",
+                content = cleanTranscript
+            )
+        )
+        persistChatState()
+    }
+
+    private fun appendVoiceCallModelTranscript(
+        sessionId: String,
+        transcript: String,
+        speakerId: String?,
+        speakerName: String?
+    ) {
+        if (transcript.isBlank()) return
+        currentVoiceCallModelText += transcript
+        val cleanTranscript = currentVoiceCallModelText.trim()
+        if (cleanTranscript.isBlank()) return
+
+        val lineIndex = currentVoiceCallModelLineId?.let { id ->
+            voiceCallTranscriptLines.indexOfFirst { it.id == id }
+        } ?: -1
+        if (lineIndex >= 0) {
+            voiceCallTranscriptLines[lineIndex] = voiceCallTranscriptLines[lineIndex].copy(
+                text = cleanTranscript,
+                streaming = true
+            )
+        } else {
+            val line = LiveCallTranscriptLine(
+                role = "model",
+                text = cleanTranscript,
+                streaming = true
+            )
+            voiceCallTranscriptLines += line
+            currentVoiceCallModelLineId = line.id
+        }
+
+        val index = sessions.indexOfFirst { it.id == sessionId }
+        if (index < 0) return
+        val session = sessions[index]
+        val content = cleanTranscript
+        val messageIndex = voiceCallModelMessageId?.let { id ->
+            session.messages.indexOfFirst { message -> message.id == id }
+        } ?: -1
+        val updatedMessages = session.messages.toMutableList()
+
+        if (messageIndex >= 0) {
+            val existing = updatedMessages[messageIndex]
+            updatedMessages[messageIndex] = existing.copy(content = content)
+        } else {
+            val message = ChatMessage(
+                role = "model",
+                content = content,
+                speakerId = speakerId,
+                speakerName = speakerName
+            )
+            updatedMessages += message
+            voiceCallModelMessageId = message.id
+        }
+
+        sessions[index] = session.copy(
+            messages = updatedMessages,
+            preview = previewFor(updatedMessages),
+            updatedAt = currentTime()
+        )
+
+        maybeReconnectLiveCallAfterVisualRefusal(sessionId, cleanTranscript)
+    }
+
+    private fun maybeReconnectLiveCallAfterVisualRefusal(
+        sessionId: String,
+        transcript: String
+    ) {
+        if (!voiceCallActive || voiceCallVisualReconnectPending) return
+        if (!voiceCallVideoEnabled && !voiceCallScreenShareEnabled) return
+        if (!transcript.isLiveVisualRefusal()) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastVoiceCallVisualReconnectAt < LIVE_VISUAL_RECONNECT_COOLDOWN_MS) return
+
+        voiceCallVisualReconnectPending = true
+        lastVoiceCallVisualReconnectAt = now
+        voiceCallStatus = "Reconnecting visual context..."
+        voiceCallError = null
+        dropCurrentVoiceCallModelTurn(sessionId)
+        geminiLiveCallService.stop()
+
+        viewModelScope.launch {
+            delay(550L)
+            if (voiceCallActive) {
+                startGeminiLiveCall()
+            }
+            delay(1_200L)
+            voiceCallVisualReconnectPending = false
+        }
+    }
+
+    private fun dropCurrentVoiceCallModelTurn(sessionId: String) {
+        currentVoiceCallModelLineId?.let { lineId ->
+            val lineIndex = voiceCallTranscriptLines.indexOfFirst { it.id == lineId }
+            if (lineIndex >= 0) {
+                voiceCallTranscriptLines.removeAt(lineIndex)
+            }
+        }
+
+        voiceCallModelMessageId?.let { messageId ->
+            val sessionIndex = sessions.indexOfFirst { it.id == sessionId }
+            if (sessionIndex >= 0) {
+                val session = sessions[sessionIndex]
+                val updatedMessages = session.messages.filterNot { it.id == messageId }
+                sessions[sessionIndex] = session.copy(
+                    messages = updatedMessages,
+                    preview = previewFor(updatedMessages),
+                    updatedAt = currentTime()
+                )
+            }
+        }
+
+        currentVoiceCallModelLineId = null
+        currentVoiceCallModelText = ""
+        voiceCallModelMessageId = null
+    }
+
+    private fun completeVoiceCallModelTurn(persist: Boolean = true) {
+        currentVoiceCallModelLineId?.let { id ->
+            val lineIndex = voiceCallTranscriptLines.indexOfFirst { it.id == id }
+            if (lineIndex >= 0) {
+                voiceCallTranscriptLines[lineIndex] =
+                    voiceCallTranscriptLines[lineIndex].copy(streaming = false)
+            }
+        }
+        val completedText = currentVoiceCallModelText.trim()
+        currentVoiceCallModelLineId = null
+        currentVoiceCallModelText = ""
+        voiceCallModelMessageId = null
+        if (persist && completedText.isNotBlank()) {
+            persistChatState()
+        }
+    }
+
+    private fun appendVoiceCallMessage(
+        sessionId: String,
+        message: ChatMessage
+    ) {
+        val index = sessions.indexOfFirst { it.id == sessionId }
+        if (index < 0) return
+        val session = sessions[index]
+        val updatedMessages = session.messages + message
+        sessions[index] = session.copy(
+            messages = updatedMessages,
+            preview = previewFor(updatedMessages),
+            updatedAt = currentTime()
+        )
+    }
+
+    private fun liveConversationContext(session: ChatSession): String? {
+        if (session.messages.isEmpty()) return null
+        val history = session.messages
+            .takeLast(MAX_LIVE_CONTEXT_MESSAGES)
+            .joinToString("\n") { message ->
+                val speaker = when (message.role) {
+                    "user" -> "User"
+                    "model" -> message.speakerName?.takeIf { it.isNotBlank() } ?: "Assistant"
+                    else -> message.role
+                }
+                val content = message.content
+                    .removePrefix("[User]:")
+                    .removePrefix("[AI]:")
+                    .trim()
+                "$speaker: $content"
+            }
+            .takeLast(MAX_LIVE_CONTEXT_CHARS)
+        return """
+            [Prior conversation context - continue naturally from this]
+
+            $history
+
+            [End of context. The user is now joining via voice. Continue the conversation.]
+        """.trimIndent()
+    }
+
     fun selectSession(id: String) {
         activeSessionId = id
         draft = ""
@@ -1294,17 +1899,122 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         persistChatState()
     }
 
-    fun createSession() {
+    fun createSession(projectId: String? = null) {
         val firstMember = GroupMember(persona = PersonaUiState(displayName = "New Persona"))
         val session = ChatSession(
             persona = firstMember.persona,
             members = listOf(firstMember),
             activeMemberId = firstMember.id,
             responseRounds = 1,
+            projectId = projectId,
             preview = "No messages yet"
         )
         sessions.add(0, session)
         activeSessionId = session.id
+        draft = ""
+        attachedImageUris = emptyList()
+        sessionDrawerVisible = false
+        persistChatState()
+    }
+
+    fun createProject(): String {
+        val project = ProjectUiState()
+        projects.add(0, project)
+        persistProjects()
+        return project.id
+    }
+
+    fun updateProjectName(projectId: String, value: String) {
+        updateProject(projectId) { project ->
+            project.copy(
+                name = value.take(48),
+                updatedAt = currentTime()
+            )
+        }
+    }
+
+    fun updateProjectDescription(projectId: String, value: String) {
+        updateProject(projectId) { project ->
+            project.copy(
+                description = value.take(280),
+                updatedAt = currentTime()
+            )
+        }
+    }
+
+    fun updateProjectInstruction(projectId: String, value: String) {
+        updateProject(projectId) { project ->
+            project.copy(
+                instruction = value.take(MAX_PROJECT_INSTRUCTION_CHARS),
+                updatedAt = currentTime()
+            )
+        }
+    }
+
+    fun createSessionInProject(projectId: String) {
+        createSession(projectId)
+    }
+
+    fun moveSessionToProject(sessionId: String, projectId: String?) {
+        if (projectId != null && projects.none { it.id == projectId }) return
+        val index = sessions.indexOfFirst { it.id == sessionId }
+        if (index < 0) return
+        sessions[index] = sessions[index].copy(
+            projectId = projectId,
+            updatedAt = currentTime()
+        )
+        persistChatState()
+    }
+
+    fun selectProject(projectId: String) {
+        val session = sessions.firstOrNull { it.projectId == projectId }
+        if (session != null) {
+            selectSession(session.id)
+        } else {
+            createSessionInProject(projectId)
+        }
+    }
+
+    fun duplicateSessionSettings(sessionId: String) {
+        val source = sessions.firstOrNull { it.id == sessionId } ?: return
+        val memberIdMap = source.normalizedMembers().associate { member -> member.id to UUID.randomUUID().toString() }
+        val copiedMembers = source.normalizedMembers().map { member ->
+            member.copy(id = memberIdMap.getValue(member.id))
+        }
+        val copiedActiveId = memberIdMap[source.activeMemberId] ?: copiedMembers.first().id
+        val copiedPersona = copiedMembers.firstOrNull { it.id == copiedActiveId }?.persona
+            ?: copiedMembers.first().persona
+        val copiedSession = source.copy(
+            id = UUID.randomUUID().toString(),
+            persona = copiedPersona,
+            members = copiedMembers,
+            activeMemberId = copiedActiveId,
+            preview = "No messages yet",
+            updatedAt = currentTime(),
+            messages = emptyList()
+        )
+        sessions.add(0, copiedSession)
+        activeSessionId = copiedSession.id
+        draft = ""
+        attachedImageUris = emptyList()
+        sessionDrawerVisible = false
+        persistChatState()
+    }
+
+    fun cloneSession(sessionId: String) {
+        val source = sessions.firstOrNull { it.id == sessionId } ?: return
+        val sourceTitle = source.title.ifBlank {
+            source.normalizedMembers()
+                .joinToString(" + ") { member -> member.persona.displayName.ifBlank { "New Persona" } }
+        }
+        val clone = source.freshImportCopy().copy(
+            title = sourceTitle.let { title ->
+                if (title.endsWith(" copy", ignoreCase = true)) title else "$title copy"
+            },
+            updatedAt = currentTime()
+        )
+        sessions.add(0, clone)
+        activeSessionId = clone.id
         draft = ""
         attachedImageUris = emptyList()
         sessionDrawerVisible = false
@@ -1338,6 +2048,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteActiveSession() {
         deleteSession(activeSessionId)
+    }
+
+    fun renameSession(sessionId: String, title: String) {
+        val cleanedTitle = title.trim().take(72)
+        val index = sessions.indexOfFirst { it.id == sessionId }
+        if (index < 0) return
+        sessions[index] = sessions[index].copy(
+            title = cleanedTitle,
+            updatedAt = currentTime()
+        )
+        persistChatState()
+    }
+
+    fun updateSessionHeaderName(value: String) {
+        updateActiveSession { session ->
+            session.copy(
+                title = value.take(72),
+                updatedAt = currentTime()
+            )
+        }
     }
 
     fun sessionExportFileName(sessionId: String): String {
@@ -1583,8 +2313,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateLevelSystemEnabled(value: Boolean) {
+        updateActiveSession { session ->
+            session.copy(levelSystemEnabled = value)
+        }
+    }
+
     fun updateGlobalMemoryBlock(value: String) {
-        val nextMemory = value.take(8_000)
+        val nextMemory = value.take(MAX_GLOBAL_MEMORY_CHARS)
         globalMemoryBlock = nextMemory
         viewModelScope.launch(Dispatchers.IO) {
             settingsDataStore.edit { preferences ->
@@ -1613,12 +2349,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         updatePersona { it.copy(beginnerLimits = value.take(600)) }
     }
 
+    fun updateStoryLore(value: String) {
+        updateActiveSession { session ->
+            session.copy(storyLore = value.take(MAX_STORY_LORE_CHARS))
+        }
+    }
+
     fun updatePersonaModel(value: String) {
         updatePersona { it.copy(model = value) }
     }
 
     fun updateSafetyLevel(value: SafetyLevel) {
         updatePersona { it.copy(safetyLevel = value) }
+    }
+
+    fun updateThinkingEffort(value: GeminiThinkingEffort) {
+        updatePersona { it.copy(thinkingEffort = value) }
     }
 
     fun updateTemperature(value: Float) {
@@ -1633,6 +2379,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 avatarScale = 1f,
                 avatarOffsetX = 0f,
                 avatarOffsetY = 0f
+            )
+        }
+    }
+
+    fun updateSessionHeaderAvatar(uri: Uri?) {
+        persistImagePermission(uri)
+        updateActiveSession { session ->
+            session.copy(
+                headerAvatarUri = uri,
+                headerAvatarScale = 1f,
+                headerAvatarOffsetX = 0f,
+                headerAvatarOffsetY = 0f,
+                updatedAt = currentTime()
+            )
+        }
+    }
+
+    fun transformSessionHeaderAvatar(zoomChange: Float, panX: Float, panY: Float) {
+        updateActiveSession { session ->
+            val nextScale = (session.headerAvatarScale * zoomChange).coerceIn(1f, 4f)
+            session.copy(
+                headerAvatarScale = nextScale,
+                headerAvatarOffsetX = (session.headerAvatarOffsetX + panX).coerceIn(-180f, 180f),
+                headerAvatarOffsetY = (session.headerAvatarOffsetY + panY).coerceIn(-180f, 180f),
+                updatedAt = currentTime()
             )
         }
     }
@@ -1761,9 +2532,84 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun updateProject(projectId: String, transform: (ProjectUiState) -> ProjectUiState) {
+        val index = projects.indexOfFirst { it.id == projectId }
+        if (index >= 0) {
+            projects[index] = transform(projects[index])
+            persistProjects()
+        }
+    }
+
     private fun memoryForSession(session: ChatSession): String? {
         val memory = globalMemoryBlock.trim()
-        return memory.takeIf { session.memoryEnabled && it.isNotBlank() }
+        if (!session.memoryEnabled || memory.isBlank()) return null
+        return if (memory.length <= MAX_INJECTED_GLOBAL_MEMORY_CHARS) {
+            memory
+        } else {
+            memory.take(MAX_INJECTED_GLOBAL_MEMORY_CHARS) +
+                "\n\n[Global memory continues locally, but only the first $MAX_INJECTED_GLOBAL_MEMORY_CHARS characters are injected for this request.]"
+        }
+    }
+
+    private fun projectInstructionForSession(session: ChatSession): String? {
+        val projectId = session.projectId ?: return null
+        return projects.firstOrNull { it.id == projectId }
+            ?.instruction
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun personaEntityForSession(
+        session: ChatSession,
+        id: String,
+        persona: PersonaUiState = session.persona
+    ): PersonaEntity {
+        val currentSession = sessions.firstOrNull { it.id == session.id } ?: session
+        return persona.toEntity(
+            id = id,
+            memoryBlock = memoryForSession(currentSession),
+            projectInstruction = projectInstructionForSession(currentSession),
+            storyLore = currentSession.storyLore,
+            levelInstruction = levelInstructionForSession(currentSession)
+        )
+    }
+
+    private fun awardTextMessageXp(sessionId: String, originalText: String) {
+        if (originalText.isBlank()) return
+        val index = sessions.indexOfFirst { it.id == sessionId }
+        if (index < 0) return
+        val session = sessions[index]
+        if (!session.levelSystemEnabled || session.levelXp >= MAX_LEVEL_XP) return
+        sessions[index] = session.copy(
+            levelXp = (session.levelXp + XP_PER_TEXT_MESSAGE).coerceAtMost(MAX_LEVEL_XP),
+            updatedAt = currentTime()
+        )
+        persistChatState()
+    }
+
+    private fun levelInstructionForSession(session: ChatSession): String? {
+        if (!session.levelSystemEnabled) return null
+        val state = sessionLevelState(session.levelXp)
+        return """
+            Session relationship progression is enabled and managed by the app.
+            Current relationship level: ${state.level}/10.
+            Current XP: ${state.xp}/$MAX_LEVEL_XP.
+            Current behavior stage: ${state.label}.
+
+            Follow the current stage as a maximum intimacy boundary. Behaviors from higher stages remain locked even if requested; refuse or redirect naturally while staying in character. Behaviors from the current stage and every earlier stage are allowed when they fit the persona and conversation. Do not mention XP, levels, locked stages, or this progression system unless the user explicitly asks about it.
+
+            Progression:
+            Level 1: Cold / Neutral
+            Level 2: Curious / Warming up
+            Level 3: Familiar / Banter
+            Level 4: Friendly / Flirting
+            Level 5: NSFW unlocked / Vanilla physical
+            Level 6: Trusting / Compliant
+            Level 7: Passionate / Rough-Hardcore unlocked
+            Level 8: Intimate / Sensory focus
+            Level 9: Devoted / Dark-Taboo unlocked
+            Level 10: Max friendship / Inseparable / Uninhibited
+        """.trimIndent()
     }
 
     private fun appendMessage(sessionId: String, message: ChatMessage, preview: String) {
@@ -1777,6 +2623,111 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
             persistChatState()
         }
+    }
+
+    private suspend fun appendModelResponseOrRecover(
+        sessionId: String,
+        session: ChatSession,
+        rawText: String,
+        speaker: GroupMember? = null
+    ) {
+        val speakerName = speaker?.persona?.displayName ?: session.persona.displayName
+        val cleanResponse = cleanModelResponseOrNull(rawText, speakerName)
+        if (cleanResponse != null) {
+            appendMessage(
+                sessionId = sessionId,
+                message = ChatMessage(
+                    role = "model",
+                    content = cleanResponse,
+                    speakerId = speaker?.id,
+                    speakerName = speaker?.persona?.displayName
+                ),
+                preview = if (speaker == null) {
+                    cleanResponse.take(72)
+                } else {
+                    "${speaker.persona.displayName}: ${cleanResponse.take(56)}"
+                }
+            )
+            return
+        }
+
+        recoverEmptyResponseWithPing(
+            sessionId = sessionId,
+            requestedSpeaker = speaker
+        )
+    }
+
+    private suspend fun recoverEmptyResponseWithPing(
+        sessionId: String,
+        requestedSpeaker: GroupMember?
+    ) {
+        val pingMessage = ChatMessage(role = "user", content = "ping")
+        appendMessage(
+            sessionId = sessionId,
+            message = pingMessage,
+            preview = "ping"
+        )
+
+        val refreshedSession = sessions.firstOrNull { it.id == sessionId } ?: return
+        val members = refreshedSession.normalizedMembers()
+        val targetMember = requestedSpeaker?.let { requested ->
+            members.firstOrNull { it.id == requested.id }
+        } ?: members.firstOrNull { it.id == refreshedSession.activeMemberId }
+            ?: members.first()
+        val apiKey = apiKeyManager.keyForProvider(targetMember.persona.vendor.id)
+        if (apiKey.isNullOrBlank()) {
+            chatError = "Could not recover the empty response because the API key is missing."
+            return
+        }
+
+        val result = retryTemporaryUnavailable {
+            geminiChatService.sendMessage(
+                apiKey = apiKey,
+                persona = personaEntityForSession(
+                    session = refreshedSession,
+                    id = targetMember.id,
+                    persona = targetMember.persona
+                ),
+                history = refreshedSession.messages.dropLast(1).toEntities(sessionId),
+                userInput = "ping",
+                vendor = targetMember.persona.vendor,
+                safetyLevel = targetMember.persona.safetyLevel,
+                images = emptyList(),
+                webSearchEnabled = false,
+                masterPrompt = masterSystemPrompt
+            )
+        }
+
+        result
+            .onSuccess { reply ->
+                recordUsage(reply)
+                val cleanResponse = cleanModelResponseOrNull(
+                    raw = reply.text,
+                    speakerName = targetMember.persona.displayName
+                )
+                if (cleanResponse == null) {
+                    chatError = "The model returned another empty response."
+                    return@onSuccess
+                }
+                val isGroup = members.size > 1
+                appendMessage(
+                    sessionId = sessionId,
+                    message = ChatMessage(
+                        role = "model",
+                        content = cleanResponse,
+                        speakerId = targetMember.id.takeIf { isGroup },
+                        speakerName = targetMember.persona.displayName.takeIf { isGroup }
+                    ),
+                    preview = if (isGroup) {
+                        "${targetMember.persona.displayName}: ${cleanResponse.take(56)}"
+                    } else {
+                        cleanResponse.take(72)
+                    }
+                )
+            }
+            .onFailure { throwable ->
+                handleSendFailure(throwable, pingMessage.id)
+            }
     }
 
     private fun replaceMessage(
@@ -1837,6 +2788,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun restoreProjects() {
+        val rawState = settingsDataStore.data.first()[projectStateKey] ?: return
+        val restoredProjects = decodeProjectState(rawState)
+        if (restoredProjects.isNotEmpty()) {
+            projects.clear()
+            projects.addAll(restoredProjects)
+        }
+    }
+
     private suspend fun restoreLauncherChoice() {
         val preferences = settingsDataStore.data.first()
         val restoredIcon = AppIconChoice.entries.firstOrNull { it.id == preferences[appIconChoiceKey] } ?: AppIconChoice.Minimalist
@@ -1844,6 +2804,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         appIconChoice = restoredIcon
         appNameChoice = restoredName
         applyLauncherChoice(restoredName, restoredIcon)
+    }
+
+    private suspend fun restoreGeminiLiveVoice() {
+        val preferences = settingsDataStore.data.first()
+        selectedGeminiLiveVoice = GeminiLiveVoice.entries.firstOrNull { it.id == preferences[geminiLiveVoiceKey] }
+            ?: GeminiLiveVoice.Aoede
     }
 
     private fun applyLauncherChoice(name: AppNameChoice, icon: AppIconChoice) {
@@ -1888,6 +2854,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 settingsDataStore.edit { preferences ->
                     preferences[activeSessionIdKey] = activeId
                 }
+            }
+        }
+    }
+
+    private fun persistProjects() {
+        val projectSnapshot = projects.toList()
+        viewModelScope.launch(Dispatchers.IO) {
+            settingsDataStore.edit { preferences ->
+                preferences[projectStateKey] = encodeProjectState(projectSnapshot)
             }
         }
     }
@@ -2000,6 +2975,69 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             apiKey = tavilyKey,
             query = content
         ) ?: content
+    }
+
+    private suspend fun executeToolCall(
+        toolCall: GeminiToolCall,
+        sessionId: String,
+        session: ChatSession,
+        history: List<ChatMessage>,
+        content: String,
+        apiKey: String,
+        loadedImages: List<Bitmap>,
+        userMessage: ChatMessage
+    ): Boolean {
+        return when (toolCall.name) {
+            "web_search" -> {
+                val query = toolCall.args.optString("query").ifBlank { content }
+                val tavilyKey = apiKeyManager.keyForTavily()
+                val searchContext = if (tavilyKey.isNullOrBlank()) {
+                    content
+                } else {
+                    tavilyRepository.searchContext(
+                        apiKey = tavilyKey,
+                        query = query
+                    ) ?: content
+                }
+                val finalResult = retryTemporaryUnavailable {
+                    geminiChatService.sendMessage(
+                        apiKey = apiKey,
+                        persona = personaEntityForSession(session, sessionId),
+                        history = history.toEntities(sessionId),
+                        userInput = searchContext,
+                        vendor = ApiVendor.Google,
+                        safetyLevel = session.persona.safetyLevel,
+                        images = loadedImages,
+                        webSearchEnabled = false,
+                        masterPrompt = masterSystemPrompt
+                    )
+                }
+                val reply = finalResult.getOrElse { throwable ->
+                    handleSendFailure(throwable, userMessage.id)
+                    return true
+                }
+                recordUsage(reply)
+                appendModelResponseOrRecover(
+                    sessionId = sessionId,
+                    session = session,
+                    rawText = reply.text
+                )
+                true
+            }
+
+            "anime_image_search" -> {
+                val request = toolCall.args.optString("request").ifBlank { content }
+                val preset = toolCall.args.optString("preset").toAnimeImagePreset() ?: animeImagePreset
+                executeAnimeImageTool(
+                    sessionId = sessionId,
+                    request = request,
+                    preset = preset
+                )
+                true
+            }
+
+            else -> false
+        }
     }
 
     private suspend fun pickAnimeImageTags(request: String, preset: AnimeImagePreset): String {
@@ -2150,6 +3188,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return tagLike && imageTagHint
     }
 
+    private fun parseTextToolCall(
+        raw: String,
+        enabledTools: Set<String>,
+        currentMessage: String
+    ): GeminiToolCall? {
+        if (enabledTools.isEmpty() || !raw.looksLikeToolJson()) return null
+        val jsonText = extractJsonObject(raw) ?: return null
+        val root = runCatching { JSONObject(jsonText) }.getOrNull() ?: return null
+        val actionName = normalizeToolName(
+            root.optString("action").ifBlank {
+                root.optString("name").ifBlank {
+                    root.optString("tool")
+                }
+            }
+        )
+        val directName = enabledTools.firstOrNull { toolName -> root.has(toolName) }
+        val toolName = actionName ?: directName ?: return null
+        if (toolName !in enabledTools) return null
+
+        val normalizedMessage = currentMessage.lowercase(Locale.US)
+        if (toolName == "web_search" && !shouldOfferWebSearch(normalizedMessage)) return null
+        if (toolName == "anime_image_search" && !shouldOfferAnimeImageSearch(normalizedMessage)) return null
+
+        val args = root.optJSONObject("action_input")
+            ?: root.optJSONObject("input")
+            ?: root.optJSONObject("arguments")
+            ?: root.optJSONObject(toolName)
+            ?: JSONObject()
+        return GeminiToolCall(toolName, args)
+    }
+
     private fun localAppAwarenessReply(message: String): String? {
         val normalized = message.lowercase(Locale.US)
         val asksAppIdentity = listOf(
@@ -2212,6 +3281,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun <T> retryTemporaryUnavailable(
+        maxAttempts: Int = 5,
+        block: suspend () -> Result<T>
+    ): Result<T> {
+        for (attempt in 1..maxAttempts) {
+            val result = block()
+            if (result.isSuccess) {
+                if (attempt > 1) chatError = null
+                return result
+            }
+
+            val throwable = result.exceptionOrNull()
+                ?: return result
+            if (!isTemporaryUnavailableError(throwable) || attempt == maxAttempts) {
+                return result
+            }
+
+            chatError = "Model temporarily unavailable. Retrying ${attempt + 1}/$maxAttempts..."
+            delay((600L * attempt).coerceAtMost(2_400L))
+        }
+        return Result.failure(IllegalStateException("Model retry attempts exhausted."))
+    }
+
+    private fun isTemporaryUnavailableError(throwable: Throwable): Boolean {
+        val normalized = throwable.message.orEmpty().lowercase(Locale.US)
+        return normalized.contains("503") ||
+            normalized.contains("service is currently unavailable") ||
+            normalized.contains("temporarily unavailable") ||
+            normalized.contains("status\": \"unavailable") ||
+            normalized.contains("status: unavailable")
+    }
+
     private fun handleSendFailure(throwable: Throwable, retryMessageId: String) {
         if (isRateLimitError(throwable)) {
             rateLimitRetryMessageId = retryMessageId
@@ -2250,6 +3351,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 normalized.contains("unexpected response") ->
                 apiMessage?.take(160) ?: "The model returned an unexpected server response. Retry in a moment."
 
+            normalized.contains("content generation stopped") ->
+                "The model stopped the reply early. Try again or rephrase."
+
             normalized.contains("401") ||
                 normalized.contains("403") ||
                 normalized.contains("api key") ->
@@ -2262,12 +3366,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        geminiLiveCallService.stop()
         stopTtsPlayback()
         super.onCleared()
     }
 }
 
 private const val TTS_PROVIDER_ELEVENLABS = "elevenlabs"
+private const val MAX_LIVE_CONTEXT_MESSAGES = 60
+private const val MAX_LIVE_CONTEXT_CHARS = 24_000
+private const val LIVE_VISUAL_RECONNECT_COOLDOWN_MS = 8_000L
 
 private fun compactLabel(value: String): String {
     val trimmed = value.trim()
@@ -2316,6 +3424,30 @@ private fun ChatSession.normalizedMembers(): List<GroupMember> {
     }
 }
 
+private fun String.isLiveVisualRefusal(): Boolean {
+    val normalized = lowercase(Locale.US)
+        .replace("’", "'")
+        .replace("cannot", "can't")
+    val languageModelRefusal = normalized.contains("language model") ||
+        normalized.contains("text-based ai") ||
+        normalized.contains("text based ai")
+    val cannotHelp = normalized.contains("can't help") ||
+        normalized.contains("can't assist") ||
+        normalized.contains("not able to help") ||
+        normalized.contains("unable to help")
+    return languageModelRefusal && cannotHelp
+}
+
+private fun String.isRecoverableLiveGoAway(): Boolean {
+    val normalized = lowercase(Locale.US)
+    return normalized.contains("gemini live closed (1008)") &&
+        (
+            normalized.contains("goaway") ||
+                normalized.contains("go away") ||
+                normalized.contains("failed to close the connection")
+            )
+}
+
 private fun groupTurnSpeakers(
     members: List<GroupMember>,
     turns: Int
@@ -2340,9 +3472,89 @@ private fun groupTurnSpeakers(
     return speakers
 }
 
+private fun taggedMembersForMessage(
+    message: String,
+    members: List<GroupMember>
+): List<GroupMember> {
+    fun containsMention(alias: String): Boolean {
+        if (alias.isBlank()) return false
+        return Regex(
+            pattern = "(^|\\s)@${Regex.escape(alias)}(?=\\s|$|[,:;.!?])",
+            option = RegexOption.IGNORE_CASE
+        ).containsMatchIn(message)
+    }
+
+    val fullNameMatches = members.filter { member ->
+        val displayName = member.persona.displayName.trim()
+        displayName.isNotBlank() && containsMention(displayName)
+    }
+    if (fullNameMatches.isNotEmpty()) return fullNameMatches
+
+    return members.filter { member ->
+        val firstName = member.persona.displayName.trim().substringBefore(' ')
+        containsMention(firstName)
+    }
+}
+
+private const val MAX_GLOBAL_MEMORY_CHARS = 64_000
+private const val MAX_INJECTED_GLOBAL_MEMORY_CHARS = 24_000
+private const val MAX_PROJECT_INSTRUCTION_CHARS = 16_000
+private const val MAX_STORY_LORE_CHARS = 16_000
+private const val MAX_LEVEL_XP = 1_500
+private const val XP_PER_TEXT_MESSAGE = 10
+
+private val LEVEL_THRESHOLDS = listOf(
+    0,
+    50,
+    120,
+    220,
+    350,
+    500,
+    700,
+    950,
+    1_200,
+    1_500
+)
+
+private val LEVEL_LABELS = listOf(
+    "Cold / Neutral",
+    "Curious / Warming up",
+    "Familiar / Banter",
+    "Friendly / Flirting",
+    "NSFW unlocked / Vanilla physical",
+    "Trusting / Compliant",
+    "Passionate / Rough-Hardcore unlocked",
+    "Intimate / Sensory focus",
+    "Devoted / Dark-Taboo unlocked",
+    "Max friendship / Inseparable"
+)
+
+fun sessionLevelState(xp: Int): SessionLevelState {
+    val safeXp = xp.coerceIn(0, MAX_LEVEL_XP)
+    val levelIndex = LEVEL_THRESHOLDS.indexOfLast { threshold -> safeXp >= threshold }
+        .coerceAtLeast(0)
+    val nextIndex = (levelIndex + 1).coerceAtMost(LEVEL_THRESHOLDS.lastIndex)
+    return SessionLevelState(
+        level = levelIndex + 1,
+        xp = safeXp,
+        currentLevelXp = LEVEL_THRESHOLDS[levelIndex],
+        nextLevelXp = LEVEL_THRESHOLDS[nextIndex],
+        label = LEVEL_LABELS[levelIndex]
+    )
+}
+
+private fun cleanModelResponseOrNull(raw: String, speakerName: String): String? {
+    val stripped = stripToolJsonNoise(raw.trim()).trim()
+    if (stripped.isBlank() || stripped.equals("(empty response)", ignoreCase = true)) {
+        return null
+    }
+    return cleanModelResponse(stripped, speakerName)
+        .takeIf { it.isNotBlank() && !it.equals("(empty response)", ignoreCase = true) }
+}
+
 private fun cleanModelResponse(raw: String, speakerName: String): String {
     val fallback = "(empty response)"
-    val text = raw.trim().ifBlank { fallback }
+    val text = stripToolJsonNoise(raw.trim()).ifBlank { fallback }
     val name = speakerName.trim()
     if (name.isBlank()) return text
 
@@ -2356,6 +3568,37 @@ private fun cleanModelResponse(raw: String, speakerName: String): String {
     }.trim()
 
     return withoutPrefix.ifBlank { text }
+}
+
+private fun normalizeToolName(raw: String): String? {
+    return when (raw.trim().lowercase(Locale.US).replace('-', '_').replace(' ', '_')) {
+        "web_search", "search_web", "browse", "browser", "web" -> "web_search"
+        "anime_image_search", "anime_image", "image_search", "r34", "rule34", "rule_34" -> "anime_image_search"
+        else -> null
+    }
+}
+
+private fun String.looksLikeToolJson(): Boolean {
+    val normalized = lowercase(Locale.US)
+    return normalized.contains("anime_image_search") ||
+        normalized.contains("web_search") ||
+        normalized.contains("\"action\"") && normalized.contains("action_input")
+}
+
+private fun extractJsonObject(raw: String): String? {
+    val start = raw.indexOf('{')
+    val end = raw.lastIndexOf('}')
+    return if (start >= 0 && end > start) raw.substring(start, end + 1) else null
+}
+
+private fun stripToolJsonNoise(raw: String): String {
+    if (!raw.looksLikeToolJson()) return raw
+    val json = extractJsonObject(raw)
+    val withoutJson = if (json == null) raw else raw.replace(json, " ")
+    return withoutJson
+        .replace(Regex("(?i)\\b(browsing|fetching|searching)\\.\\.\\."), " ")
+        .replace(Regex("(?i)\\b(browsing|fetching|searching)\\s*$"), " ")
+        .trim()
 }
 
 private fun groupMemberInput(
@@ -2393,8 +3636,10 @@ private fun exportSessionJson(session: ChatSession): String {
 }
 
 private fun exportFileNameFor(session: ChatSession): String {
-    val title = session.normalizedMembers()
-        .joinToString("-") { it.persona.displayName.ifBlank { "AI" } }
+    val title = session.title.ifBlank {
+        session.normalizedMembers()
+            .joinToString("-") { it.persona.displayName.ifBlank { "AI" } }
+    }
         .replace(Regex("[^A-Za-z0-9._-]+"), "-")
         .trim('-', '.', '_')
         .take(48)
@@ -2466,13 +3711,45 @@ private fun decodeChatState(rawState: String): RestoredChatState? {
     }.getOrNull()
 }
 
+private fun encodeProjectState(projects: List<ProjectUiState>): String {
+    return JSONObject()
+        .put(
+            "projects",
+            JSONArray().apply {
+                projects.forEach { project -> put(project.toJson()) }
+            }
+        )
+        .toString()
+}
+
+private fun decodeProjectState(rawState: String): List<ProjectUiState> {
+    return runCatching {
+        val root = JSONObject(rawState)
+        val projectsJson = root.optJSONArray("projects") ?: JSONArray()
+        buildList {
+            for (index in 0 until projectsJson.length()) {
+                projectsJson.optJSONObject(index)?.toProjectUiState()?.let { add(it) }
+            }
+        }
+    }.getOrDefault(emptyList())
+}
+
 private fun ChatSession.toJson(): JSONObject {
     return JSONObject()
         .put("id", id)
+        .put("title", title)
+        .put("headerAvatarUri", headerAvatarUri?.toString() ?: JSONObject.NULL)
+        .put("headerAvatarScale", headerAvatarScale.toDouble())
+        .put("headerAvatarOffsetX", headerAvatarOffsetX.toDouble())
+        .put("headerAvatarOffsetY", headerAvatarOffsetY.toDouble())
         .put("persona", persona.toJson())
         .put("activeMemberId", activeMemberId)
         .put("responseRounds", responseRounds)
         .put("memoryEnabled", memoryEnabled)
+        .put("storyLore", storyLore)
+        .put("levelSystemEnabled", levelSystemEnabled)
+        .put("levelXp", levelXp.coerceIn(0, MAX_LEVEL_XP))
+        .put("projectId", projectId ?: JSONObject.NULL)
         .put(
             "members",
             JSONArray().apply {
@@ -2511,17 +3788,58 @@ private fun JSONObject.toChatSession(): ChatSession {
         ?: restoredMembers.first().id
     val activePersona = restoredMembers.firstOrNull { it.id == activeMemberId }?.persona
         ?: restoredMembers.first().persona
+    val legacyStoryLore = sequence {
+        yield(optJSONObject("persona")?.optString("storyLore").orEmpty())
+        if (membersJson != null) {
+            for (index in 0 until membersJson.length()) {
+                yield(
+                    membersJson.optJSONObject(index)
+                        ?.optJSONObject("persona")
+                        ?.optString("storyLore")
+                        .orEmpty()
+                )
+            }
+        }
+    }.firstOrNull { it.isNotBlank() }.orEmpty()
     return ChatSession(
         id = optString("id").ifBlank { UUID.randomUUID().toString() },
+        title = optString("title"),
+        headerAvatarUri = optNullableString("headerAvatarUri")?.let(Uri::parse),
+        headerAvatarScale = optDouble("headerAvatarScale", 1.0).toFloat(),
+        headerAvatarOffsetX = optDouble("headerAvatarOffsetX", 0.0).toFloat(),
+        headerAvatarOffsetY = optDouble("headerAvatarOffsetY", 0.0).toFloat(),
         persona = activePersona,
         members = restoredMembers,
         activeMemberId = activeMemberId,
         responseRounds = optInt("responseRounds", 1).coerceIn(1, 3),
         memoryEnabled = if (has("memoryEnabled")) optBoolean("memoryEnabled", true) else true,
+        storyLore = optString("storyLore").ifBlank { legacyStoryLore }.take(MAX_STORY_LORE_CHARS),
+        levelSystemEnabled = optBoolean("levelSystemEnabled", false),
+        levelXp = optInt("levelXp", 0).coerceIn(0, MAX_LEVEL_XP),
+        projectId = optNullableString("projectId"),
         background = optJSONObject("background")?.toChatBackground() ?: ChatBackground.DarkMode,
         preview = optString("preview").ifBlank { previewForRestored(restoredMessages) },
         updatedAt = optString("updatedAt").ifBlank { "Now" },
         messages = restoredMessages
+    )
+}
+
+private fun ProjectUiState.toJson(): JSONObject {
+    return JSONObject()
+        .put("id", id)
+        .put("name", name)
+        .put("description", description)
+        .put("instruction", instruction)
+        .put("updatedAt", updatedAt)
+}
+
+private fun JSONObject.toProjectUiState(): ProjectUiState {
+    return ProjectUiState(
+        id = optString("id").ifBlank { UUID.randomUUID().toString() },
+        name = optString("name").ifBlank { "New project" },
+        description = optString("description"),
+        instruction = optString("instruction"),
+        updatedAt = optString("updatedAt").ifBlank { "Now" }
     )
 }
 
@@ -2550,6 +3868,7 @@ private fun PersonaUiState.toJson(): JSONObject {
         .put("vendor", vendor.id)
         .put("model", model)
         .put("safetyLevel", safetyLevel.name)
+        .put("thinkingEffort", thinkingEffort.name)
         .put("temperature", temperature.toDouble())
         .put("avatarUri", avatarUri?.toString() ?: JSONObject.NULL)
         .put("avatarScale", avatarScale.toDouble())
@@ -2588,6 +3907,8 @@ private fun JSONObject.toPersonaUiState(): PersonaUiState {
         vendor = vendor,
         model = optString("model").ifBlank { vendor.defaultModel },
         safetyLevel = SafetyLevel.entries.firstOrNull { it.name == optString("safetyLevel") } ?: SafetyLevel.None,
+        thinkingEffort = GeminiThinkingEffort.entries.firstOrNull { it.name == optString("thinkingEffort") }
+            ?: GeminiThinkingEffort.Low,
         temperature = optDouble("temperature", 1.0).toFloat().coerceIn(0f, 2f),
         avatarUri = optNullableString("avatarUri")?.let(Uri::parse),
         avatarScale = optDouble("avatarScale", 1.0).toFloat().coerceIn(1f, 4f),
@@ -2656,10 +3977,10 @@ private fun JSONObject.toChatMessage(): ChatMessage {
     return ChatMessage(
         id = optString("id").ifBlank { UUID.randomUUID().toString() },
         role = optString("role").ifBlank { "user" },
-        content = optString("content"),
+        content = normalizeCallTranscriptContent(optString("content")),
         speakerId = optNullableString("speakerId"),
         speakerName = optNullableString("speakerName"),
-        imageUris = restoredImageUris.take(6),
+        imageUris = restoredImageUris.take(12),
         remoteImageUrl = optNullableString("remoteImageUrl"),
         isImageLoading = false,
         time = optString("time").ifBlank { currentTime() }
@@ -2700,24 +4021,43 @@ private fun loadMasterPrompt(application: Application): String {
     }.getOrNull()?.takeIf { it.isNotBlank() }.orEmpty()
 }
 
-private fun PersonaUiState.toEntity(id: String, memoryBlock: String? = null): PersonaEntity {
+private fun PersonaUiState.toEntity(
+    id: String,
+    memoryBlock: String? = null,
+    projectInstruction: String? = null,
+    storyLore: String? = null,
+    levelInstruction: String? = null
+): PersonaEntity {
     val basePrompt = effectiveInstructionPrompt()
-    val promptWithMemory = if (memoryBlock.isNullOrBlank()) {
-        basePrompt
-    } else {
-        listOf(
-            basePrompt,
-            "Global memory shared by the user across sessions. Treat these as stable user facts/preferences unless the current message corrects them:\n${memoryBlock.trim()}"
-        ).joinToString("\n\n")
+    val promptSections = mutableListOf(basePrompt)
+    if (!projectInstruction.isNullOrBlank()) {
+        promptSections += "Project instruction shared by every chat in this project. Treat it as workspace context and follow it unless the current user message clearly overrides it:\n${projectInstruction.trim()}"
+    }
+    if (!storyLore.isNullOrBlank()) {
+        promptSections += "Story lore and world rules shared by every AI in this session. Treat this as canonical setting context:\n${storyLore.trim()}"
+    }
+    if (!memoryBlock.isNullOrBlank()) {
+        promptSections += "Global memory shared by the user across sessions. Treat these as stable user facts/preferences unless the current message corrects them:\n${memoryBlock.trim()}"
+    }
+    if (!levelInstruction.isNullOrBlank()) {
+        promptSections += levelInstruction
     }
     return PersonaEntity(
         id = id,
         name = displayName,
         avatarUri = avatarUri?.toString(),
-        systemPrompt = promptWithMemory,
+        systemPrompt = promptSections.joinToString("\n\n"),
         model = model,
-        temperature = temperature
+        temperature = temperature,
+        thinkingBudget = thinkingEffort.thinkingBudget
     )
+}
+
+private fun normalizeCallTranscriptContent(content: String): String {
+    return content
+        .removePrefix("[User]:")
+        .removePrefix("[AI]:")
+        .trimStart()
 }
 
 private fun PersonaUiState.effectiveInstructionPrompt(): String {
@@ -2750,14 +4090,15 @@ private fun List<ChatMessage>.toEntities(chatId: String): List<MessageEntity> {
     return filterNot { message ->
         message.isImageLoading || (message.remoteImageUrl != null && message.content.isBlank())
     }.map { message ->
+        val historyContent = stripToolJsonNoise(message.content).ifBlank { message.content }
         MessageEntity(
             id = message.id,
             chatId = chatId,
             role = message.role,
             content = if (message.role == "model" && !message.speakerName.isNullOrBlank()) {
-                "${message.speakerName}: ${message.content}"
+                "${message.speakerName}: $historyContent"
             } else {
-                message.content
+                historyContent
             },
             timestamp = System.currentTimeMillis()
         )

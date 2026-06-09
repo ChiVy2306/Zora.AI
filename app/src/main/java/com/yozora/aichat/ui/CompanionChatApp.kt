@@ -1,5 +1,18 @@
 package com.yozora.aichat.ui
 
+import android.Manifest
+import android.app.Activity
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.media.projection.MediaProjectionConfig
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
@@ -25,6 +38,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -61,6 +75,8 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.CameraAlt
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -74,14 +90,18 @@ import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.ScreenShare
 import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.Upload
+import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -100,6 +120,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -118,8 +139,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
@@ -135,8 +158,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.rememberAsyncImagePainter
 import com.yozora.aichat.R
@@ -148,13 +171,18 @@ import com.yozora.aichat.ui.chat.ChatBackground
 import com.yozora.aichat.ui.chat.ChatMessage
 import com.yozora.aichat.ui.chat.ChatSession
 import com.yozora.aichat.ui.chat.ChatViewModel
+import com.yozora.aichat.ui.chat.GeminiLiveVoice
+import com.yozora.aichat.ui.chat.GeminiThinkingEffort
 import com.yozora.aichat.ui.chat.GroupMember
 import com.yozora.aichat.ui.chat.InstructionMode
+import com.yozora.aichat.ui.chat.LiveCallTranscriptLine
 import com.yozora.aichat.ui.chat.PersonaUiState
+import com.yozora.aichat.ui.chat.ProjectUiState
 import com.yozora.aichat.ui.chat.QuotaUsageState
 import com.yozora.aichat.ui.chat.SafetyLevel
+import com.yozora.aichat.ui.chat.sessionLevelState
 import com.yozora.aichat.ui.chat.TtsPreviewState
-import com.yozora.aichat.ui.theme.AIChatTheme
+import com.yozora.aichat.ui.chat.VoiceCallCameraFacing
 import com.yozora.aichat.ui.theme.AppAccent
 import com.yozora.aichat.ui.theme.AppAccentDim
 import com.yozora.aichat.ui.theme.AppAccentSoft
@@ -163,14 +191,18 @@ import com.yozora.aichat.ui.theme.AppStroke
 import com.yozora.aichat.ui.theme.AppSurface
 import com.yozora.aichat.ui.theme.AppSurface2
 import com.yozora.aichat.ui.theme.AppTextPrimary
+import com.yozora.aichat.ui.theme.AppTextMuted
 import com.yozora.aichat.ui.theme.AppTextSecondary
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.time.Duration
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -178,23 +210,49 @@ import kotlinx.coroutines.yield
 
 private const val APP_VERSION_NAME = "2.1.0"
 
+private enum class DrawerSection {
+    Chats,
+    Projects
+}
+
+private enum class PersonaSettingsSection(val label: String) {
+    Context("Context"),
+    Ui("UI"),
+    ApiVault("API vault")
+}
+
 @Composable
 fun CompanionChatApp(
     viewModel: ChatViewModel = viewModel()
 ) {
     var viewedImageUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var actionMessage by remember { mutableStateOf<ChatMessage?>(null) }
-    var exportTargetSessionId by remember { mutableStateOf<String?>(null) }
     var aboutDialogVisible by remember { mutableStateOf(false) }
     val appVersionLabel = "${viewModel.appNameChoice.label} v$APP_VERSION_NAME"
+    val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
-    val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        contract = androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        val targetId = exportTargetSessionId
-        exportTargetSessionId = null
-        if (uri != null && targetId != null) {
-            viewModel.exportSessionToUri(targetId, uri)
+    val voicePermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.openVoiceCall()
+        } else {
+            viewModel.handleVoicePermissionDenied()
+        }
+    }
+    val cameraPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.enableVoiceCallVideo()
+        }
+    }
+    val screenShareLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            viewModel.startVoiceCallScreenShare(result.resultCode, data)
         }
     }
     val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -205,6 +263,61 @@ fun CompanionChatApp(
         }
     }
 
+    if (viewModel.voiceCallActive) {
+        BackHandler(onBack = viewModel::closeVoiceCall)
+        VoiceCallScreen(
+            persona = viewModel.persona,
+            isOnline = viewModel.activeApiKeyLabel != null,
+            status = viewModel.voiceCallStatus,
+            error = viewModel.voiceCallError,
+            modelId = viewModel.geminiLiveModelId,
+            selectedVoice = viewModel.selectedGeminiLiveVoice,
+            muted = viewModel.voiceCallMuted,
+            videoEnabled = viewModel.voiceCallVideoEnabled,
+            cameraFacing = viewModel.voiceCallCameraFacing,
+            screenShareEnabled = viewModel.voiceCallScreenShareEnabled,
+            transcriptLines = viewModel.voiceCallTranscriptLines,
+            onCameraFrame = viewModel::sendVoiceCallVideoFrame,
+            onBack = viewModel::closeVoiceCall,
+            onEndCall = viewModel::closeVoiceCall,
+            onRetry = viewModel::retryVoiceCall,
+            onVoiceChange = viewModel::updateGeminiLiveVoice,
+            onToggleMute = viewModel::toggleVoiceCallMute,
+            onToggleVideo = {
+                if (viewModel.voiceCallVideoEnabled) {
+                    viewModel.disableVoiceCallVideo()
+                } else {
+                    val granted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (granted) {
+                        viewModel.enableVoiceCallVideo()
+                    } else {
+                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
+                }
+            },
+            onSwitchCamera = viewModel::switchVoiceCallCamera,
+            onToggleScreenShare = {
+                if (viewModel.voiceCallScreenShareEnabled) {
+                    viewModel.stopVoiceCallScreenShare()
+                } else {
+                    val manager = context.getSystemService(MediaProjectionManager::class.java)
+                    val captureIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        manager.createScreenCaptureIntent(
+                            MediaProjectionConfig.createConfigForDefaultDisplay()
+                        )
+                    } else {
+                        manager.createScreenCaptureIntent()
+                    }
+                    screenShareLauncher.launch(captureIntent)
+                }
+            }
+        )
+        return
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -213,6 +326,11 @@ fun CompanionChatApp(
         ChatScreen(
             persona = viewModel.persona,
             groupMembers = viewModel.groupMembers,
+            sessionHeaderName = viewModel.sessionHeaderName,
+            sessionHeaderAvatarUri = viewModel.sessionHeaderAvatarUri,
+            sessionHeaderAvatarScale = viewModel.sessionHeaderAvatarScale,
+            sessionHeaderAvatarOffsetX = viewModel.sessionHeaderAvatarOffsetX,
+            sessionHeaderAvatarOffsetY = viewModel.sessionHeaderAvatarOffsetY,
             background = viewModel.background,
             messages = viewModel.messages,
             draft = viewModel.draft,
@@ -234,7 +352,18 @@ fun CompanionChatApp(
             onOpenImage = { viewedImageUri = it },
             onMessageLongPress = { actionMessage = it },
             onOpenSessions = viewModel::openSessionDrawer,
-            onOpenPersona = viewModel::openPersonaSheet
+            onOpenPersona = viewModel::openPersonaSheet,
+            onOpenVoiceCall = {
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    viewModel.openVoiceCall()
+                } else {
+                    voicePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
         )
 
         AnimatedVisibility(
@@ -261,22 +390,29 @@ fun CompanionChatApp(
             modifier = Modifier.align(Alignment.CenterStart)
         ) {
             SessionDrawer(
-            sessions = viewModel.sessions,
-            activeSessionId = viewModel.activeSessionId,
-            persona = viewModel.persona,
-            appVersionLabel = appVersionLabel,
-            onNewSession = viewModel::createSession,
-            onSelectSession = viewModel::selectSession,
-            onDeleteSession = viewModel::deleteSession,
-            onExportSession = { session ->
-                exportTargetSessionId = session.id
-                exportLauncher.launch(viewModel.sessionExportFileName(session.id))
-            },
-            onImportSession = { importLauncher.launch(arrayOf("application/json", "text/*")) },
-            onOpenSettings = viewModel::openAppSettings,
-            onOpenAbout = { aboutDialogVisible = true },
-            onClose = viewModel::closeSessionDrawer
-        )
+                sessions = viewModel.sessions,
+                projects = viewModel.projects,
+                activeSessionId = viewModel.activeSessionId,
+                activeProject = viewModel.activeProject,
+                persona = viewModel.persona,
+                appVersionLabel = appVersionLabel,
+                onNewSession = { viewModel.createSession() },
+                onNewProject = viewModel::createProject,
+                onSelectSession = viewModel::selectSession,
+                onNewSessionInProject = viewModel::createSessionInProject,
+                onMoveSessionToProject = viewModel::moveSessionToProject,
+                onUpdateProjectName = viewModel::updateProjectName,
+                onUpdateProjectDescription = viewModel::updateProjectDescription,
+                onUpdateProjectInstruction = viewModel::updateProjectInstruction,
+                onDeleteSession = viewModel::deleteSession,
+                onRenameSession = viewModel::renameSession,
+                onCloneSession = viewModel::cloneSession,
+                onDuplicateSessionSettings = viewModel::duplicateSessionSettings,
+                onImportSession = { importLauncher.launch(arrayOf("application/json", "text/*")) },
+                onOpenSettings = viewModel::openAppSettings,
+                onOpenAbout = { aboutDialogVisible = true },
+                onClose = viewModel::closeSessionDrawer
+            )
         }
 
         AnimatedVisibility(
@@ -305,9 +441,18 @@ fun CompanionChatApp(
             PersonaSettingsSheet(
                 persona = viewModel.persona,
                 groupMembers = viewModel.groupMembers,
+                showSessionHeaderControls = viewModel.showSessionHeaderControls,
+                sessionHeaderName = viewModel.sessionHeaderName,
+                sessionHeaderAvatarUri = viewModel.sessionHeaderAvatarUri,
+                sessionHeaderAvatarScale = viewModel.sessionHeaderAvatarScale,
+                sessionHeaderAvatarOffsetX = viewModel.sessionHeaderAvatarOffsetX,
+                sessionHeaderAvatarOffsetY = viewModel.sessionHeaderAvatarOffsetY,
                 activeMemberId = viewModel.activeMemberId,
                 responseRounds = viewModel.responseRounds,
                 memoryEnabled = viewModel.memoryEnabled,
+                storyLore = viewModel.storyLore,
+                levelSystemEnabled = viewModel.levelSystemEnabled,
+                levelXp = viewModel.levelXp,
                 background = viewModel.background,
                 moreOptions = viewModel.morePersonaOptions,
                 activeApiKeyLabel = viewModel.activeApiKeyLabel,
@@ -326,17 +471,23 @@ fun CompanionChatApp(
                 onRemoveMember = viewModel::removeGroupMember,
                 onResponseRoundsChange = viewModel::updateResponseRounds,
                 onMemoryEnabledChange = viewModel::updateMemoryEnabled,
+                onLevelSystemEnabledChange = viewModel::updateLevelSystemEnabled,
                 onNameChange = viewModel::updatePersonaName,
+                onSessionHeaderNameChange = viewModel::updateSessionHeaderName,
                 onInstructionModeChange = viewModel::updateInstructionMode,
                 onBeginnerRoleChange = viewModel::updateBeginnerRole,
                 onBeginnerStyleChange = viewModel::updateBeginnerStyle,
                 onBeginnerLimitsChange = viewModel::updateBeginnerLimits,
+                onStoryLoreChange = viewModel::updateStoryLore,
                 onPromptChange = viewModel::updatePersonaPrompt,
                 onModelChange = viewModel::updatePersonaModel,
                 onSafetyLevelChange = viewModel::updateSafetyLevel,
+                onThinkingEffortChange = viewModel::updateThinkingEffort,
                 onTemperatureChange = viewModel::updateTemperature,
                 onAvatarChange = viewModel::updateAvatar,
                 onAvatarTransform = viewModel::transformAvatar,
+                onSessionHeaderAvatarChange = viewModel::updateSessionHeaderAvatar,
+                onSessionHeaderAvatarTransform = viewModel::transformSessionHeaderAvatar,
                 onBackgroundChange = viewModel::updateBackground,
                 onCustomBackgroundChange = viewModel::updateCustomBackground,
                 onToggleMore = viewModel::toggleMorePersonaOptions,
@@ -358,6 +509,7 @@ fun CompanionChatApp(
                 onSave = viewModel::savePersona
             )
         }
+
     }
 
     if (viewModel.apiKeyDialogVisible) {
@@ -454,6 +606,11 @@ fun CompanionChatApp(
 private fun ChatScreen(
     persona: PersonaUiState,
     groupMembers: List<GroupMember>,
+    sessionHeaderName: String,
+    sessionHeaderAvatarUri: android.net.Uri?,
+    sessionHeaderAvatarScale: Float,
+    sessionHeaderAvatarOffsetX: Float,
+    sessionHeaderAvatarOffsetY: Float,
     background: ChatBackground,
     messages: List<ChatMessage>,
     draft: String,
@@ -475,7 +632,8 @@ private fun ChatScreen(
     onOpenImage: (android.net.Uri) -> Unit,
     onMessageLongPress: (ChatMessage) -> Unit,
     onOpenSessions: () -> Unit,
-    onOpenPersona: () -> Unit
+    onOpenPersona: () -> Unit,
+    onOpenVoiceCall: () -> Unit
 ) {
     var toolsSheetVisible by remember { mutableStateOf(false) }
     var cameraOutputUri by remember { mutableStateOf<android.net.Uri?>(null) }
@@ -501,6 +659,16 @@ private fun ChatScreen(
         }
     )
     val hasChatContent = messages.isNotEmpty() || isSending
+    val mentionTokenStart = draft.indexOfLast { it.isWhitespace() } + 1
+    val mentionToken = draft.substring(mentionTokenStart)
+    val mentionQuery = mentionToken.takeIf { it.startsWith("@") }?.drop(1).orEmpty()
+    val mentionCandidates = if (groupMembers.size > 1 && mentionToken.startsWith("@")) {
+        groupMembers.filter { member ->
+            member.persona.displayName.contains(mentionQuery, ignoreCase = true)
+        }
+    } else {
+        emptyList()
+    }
     val showJumpToLatest by remember {
         derivedStateOf {
             hasChatContent &&
@@ -553,6 +721,13 @@ private fun ChatScreen(
             scrollToNewest()
         }
     }
+    val startedTypewriterMessageIds = remember { mutableSetOf<String>() }
+    val newestTextModelMessageId = messages.lastOrNull { message ->
+        message.role == "model" &&
+            message.content.isNotBlank() &&
+            !message.isImageLoading &&
+            message.remoteImageUrl == null
+    }?.id
 
     Box(
         modifier = Modifier
@@ -568,9 +743,15 @@ private fun ChatScreen(
             ChatHeader(
                 persona = persona,
                 groupMembers = groupMembers,
+                sessionHeaderName = sessionHeaderName,
+                sessionHeaderAvatarUri = sessionHeaderAvatarUri,
+                sessionHeaderAvatarScale = sessionHeaderAvatarScale,
+                sessionHeaderAvatarOffsetX = sessionHeaderAvatarOffsetX,
+                sessionHeaderAvatarOffsetY = sessionHeaderAvatarOffsetY,
                 isOnline = isOnline,
                 onOpenSessions = onOpenSessions,
-                onOpenPersona = onOpenPersona
+                onOpenPersona = onOpenPersona,
+                onOpenVoiceCall = onOpenVoiceCall
             )
             LazyColumn(
                 state = listState,
@@ -585,7 +766,8 @@ private fun ChatScreen(
                     item {
                         EmptyChatState(
                             persona = persona,
-                            onCreatePersona = onOpenPersona
+                            onCreatePersona = onOpenPersona,
+                            onSuggestion = onDraftChange
                         )
                     }
                 } else {
@@ -599,6 +781,9 @@ private fun ChatScreen(
                             message = message,
                             persona = persona,
                             groupMembers = groupMembers,
+                            animateText = message.id == newestTextModelMessageId &&
+                                message.id !in startedTypewriterMessageIds,
+                            onTextAnimationStart = { startedTypewriterMessageIds += it },
                             onOpenImage = onOpenImage,
                             onMessageLongPress = onMessageLongPress
                         )
@@ -615,7 +800,38 @@ private fun ChatScreen(
                     .navigationBarsPadding()
                     .padding(bottom = 10.dp)
             ) {
+                AnimatedVisibility(
+                    visible = mentionCandidates.isNotEmpty(),
+                    enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+                    exit = fadeOut()
+                ) {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(mentionCandidates, key = { it.id }) { member ->
+                            Surface(
+                                color = AppSurface2,
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, AppStroke),
+                                modifier = Modifier.clickable {
+                                    val prefix = draft.substring(0, mentionTokenStart)
+                                    onDraftChange("$prefix@${member.persona.displayName} ")
+                                }
+                            ) {
+                                Text(
+                                    text = "@${member.persona.displayName}",
+                                    color = AppAccentSoft,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+                    }
+                }
                 ChatInputBar(
+                    placeholder = "Message ${persona.displayName.ifBlank { "New Persona" }}...",
                     draft = draft,
                     isSending = isSending,
                     attachedImageUris = attachedImageUris,
@@ -624,7 +840,10 @@ private fun ChatScreen(
                         focusManager.clearFocus()
                         onSend()
                     },
-                    onOpenTools = { toolsSheetVisible = true },
+                    onOpenTools = {
+                        focusManager.clearFocus(force = true)
+                        toolsSheetVisible = true
+                    },
                     onRemoveAttachedImage = onRemoveAttachedImage,
                     onOpenImage = onOpenImage
                 )
@@ -729,6 +948,657 @@ private fun ChatScreen(
 }
 
 @Composable
+private fun VoiceCallScreen(
+    persona: PersonaUiState,
+    isOnline: Boolean,
+    status: String,
+    error: String?,
+    modelId: String,
+    selectedVoice: GeminiLiveVoice,
+    muted: Boolean,
+    videoEnabled: Boolean,
+    cameraFacing: VoiceCallCameraFacing,
+    screenShareEnabled: Boolean,
+    transcriptLines: List<LiveCallTranscriptLine>,
+    onCameraFrame: (ByteArray) -> Unit,
+    onBack: () -> Unit,
+    onEndCall: () -> Unit,
+    onRetry: () -> Unit,
+    onVoiceChange: (GeminiLiveVoice) -> Unit,
+    onToggleMute: () -> Unit,
+    onToggleVideo: () -> Unit,
+    onSwitchCamera: () -> Unit,
+    onToggleScreenShare: () -> Unit
+) {
+    var voiceMenuExpanded by remember { mutableStateOf(false) }
+    var elapsedSeconds by remember { mutableStateOf(0L) }
+    val startedAt = remember { System.currentTimeMillis() }
+    val compactLayout = LocalConfiguration.current.screenHeightDp < 760
+    val avatarOuterSize = if (compactLayout) 112 else 148
+    val avatarImageSize = if (compactLayout) 92 else 122
+
+    LaunchedEffect(startedAt) {
+        while (true) {
+            elapsedSeconds = (System.currentTimeMillis() - startedAt) / 1000L
+            delay(1000L)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .background(
+                Brush.radialGradient(
+                    colors = listOf(AppAccent.copy(alpha = 0.24f), AppBackground, Color.Black),
+                    radius = 980f
+                )
+            )
+            .statusBarsPadding()
+            .navigationBarsPadding()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(62.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back to chat",
+                        tint = AppTextPrimary
+                    )
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = persona.displayName.ifBlank { "New Persona" },
+                        color = AppTextPrimary,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 3.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (isOnline) Color(0xFF35D07F) else Color(0xFF8B8898))
+                        )
+                        Spacer(modifier = Modifier.width(7.dp))
+                        Text(
+                            text = "AI Voice Call",
+                            color = AppTextSecondary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+                Box {
+                    IconButton(onClick = { voiceMenuExpanded = true }) {
+                        Icon(
+                            imageVector = Icons.Rounded.MoreVert,
+                            contentDescription = "Voice settings",
+                            tint = AppTextPrimary
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = voiceMenuExpanded,
+                        onDismissRequest = { voiceMenuExpanded = false },
+                        modifier = Modifier.background(AppSurface2)
+                    ) {
+                        GeminiLiveVoice.entries.forEach { voice ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(
+                                            text = voice.label,
+                                            color = AppTextPrimary,
+                                            style = MaterialTheme.typography.labelLarge
+                                        )
+                                        Text(
+                                            text = voice.description,
+                                            color = AppTextSecondary,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    onVoiceChange(voice)
+                                    voiceMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = if (compactLayout) 2.dp else 8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.VolumeUp,
+                    contentDescription = null,
+                    tint = AppAccentSoft,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Gemini 3 Flash Live - ${formatCallDuration(elapsedSeconds)}",
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+            }
+            Text(
+                text = modelId,
+                color = AppTextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+
+            Spacer(modifier = Modifier.height(if (compactLayout) 8.dp else 14.dp))
+            if (videoEnabled) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.78f)
+                        .heightIn(max = if (compactLayout) 170.dp else 220.dp)
+                        .aspectRatio(4f / 3f)
+                ) {
+                    LiveCameraPreview(
+                        cameraFacing = cameraFacing,
+                        onFrame = onCameraFrame,
+                        modifier = Modifier
+                            .matchParentSize()
+                            .clip(RoundedCornerShape(24.dp))
+                            .border(1.dp, AppAccentSoft.copy(alpha = 0.82f), RoundedCornerShape(24.dp))
+                    )
+                    Surface(
+                        color = AppSurface.copy(alpha = 0.78f),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, AppStroke),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                    ) {
+                        IconButton(onClick = onSwitchCamera) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "Switch camera",
+                                tint = AppTextPrimary
+                            )
+                        }
+                    }
+                    Surface(
+                        color = AppSurface.copy(alpha = 0.78f),
+                        shape = RoundedCornerShape(999.dp),
+                        border = BorderStroke(1.dp, AppStroke.copy(alpha = 0.7f)),
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            text = if (cameraFacing == VoiceCallCameraFacing.Front) "Front camera" else "Back camera",
+                            color = AppTextPrimary,
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+            } else {
+                VoiceAvatar(
+                    persona = persona,
+                    outerSize = avatarOuterSize,
+                    imageSize = avatarImageSize
+                )
+            }
+
+            Spacer(modifier = Modifier.height(if (compactLayout) 10.dp else 18.dp))
+            val callDisplayName = persona.displayName.ifBlank { "New Persona" }
+            Text(
+                text = buildAnnotatedString {
+                    val splitIndex = callDisplayName.lastIndexOf(' ')
+                    if (splitIndex > 0) {
+                        append(callDisplayName.substring(0, splitIndex))
+                        append(" ")
+                        withStyle(SpanStyle(color = AppAccentSoft, fontWeight = FontWeight.Bold)) {
+                            append(callDisplayName.substring(splitIndex + 1))
+                        }
+                    } else {
+                        withStyle(SpanStyle(color = AppAccentSoft, fontWeight = FontWeight.Bold)) {
+                            append(callDisplayName)
+                        }
+                    }
+                },
+                color = AppTextPrimary,
+                style = MaterialTheme.typography.headlineSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(if (isOnline) Color(0xFF35D07F) else Color(0xFF8B8898))
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (isOnline) "Online" else "Offline",
+                    color = AppTextSecondary,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+            }
+
+            VoiceWaveform(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 28.dp, vertical = 8.dp)
+                    .height(if (compactLayout) 38.dp else 48.dp)
+            )
+
+            LiveCallTranscriptPanel(
+                lines = transcriptLines,
+                status = status.takeIf { it.isNotBlank() && it != "Idle" }
+                    ?: if (muted) "Muted" else "Listening...",
+                voiceName = selectedVoice.label,
+                error = error,
+                onRetry = onRetry,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(top = 4.dp, bottom = 10.dp)
+            )
+            Surface(
+                color = AppSurface.copy(alpha = 0.86f),
+                shape = RoundedCornerShape(22.dp),
+                border = BorderStroke(1.dp, AppStroke),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    VoiceControlButton(
+                        icon = if (muted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
+                        label = "Mute",
+                        selected = muted,
+                        onClick = onToggleMute
+                    )
+                    VoiceControlButton(
+                        icon = Icons.Rounded.Videocam,
+                        label = "Video",
+                        selected = videoEnabled,
+                        onClick = onToggleVideo
+                    )
+                    VoiceControlButton(
+                        icon = Icons.Rounded.ScreenShare,
+                        label = "Share",
+                        selected = screenShareEnabled,
+                        onClick = onToggleScreenShare
+                    )
+                    VoiceControlButton(
+                        icon = Icons.Rounded.CallEnd,
+                        label = "End",
+                        danger = true,
+                        onClick = onEndCall
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveCallTranscriptPanel(
+    lines: List<LiveCallTranscriptLine>,
+    status: String,
+    voiceName: String,
+    error: String?,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val recentLines = lines.takeLast(3)
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(AppSurface.copy(alpha = 0.74f))
+            .border(1.dp, AppStroke.copy(alpha = 0.75f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Bottom,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (error != null) {
+                Surface(
+                    color = Color(0xFF321820),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Color(0xFFFF7E8B).copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = error,
+                            color = Color(0xFFFFB4BD),
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        TextButton(onClick = onRetry) {
+                            Text("Reconnect", color = AppAccentSoft)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            if (recentLines.isEmpty()) {
+                Text(
+                    text = if (status == "Speaking...") "Speaking..." else "Start talking",
+                    color = AppTextMuted,
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center
+                )
+            } else {
+                recentLines.forEachIndexed { index, line ->
+                    val latest = index == recentLines.lastIndex
+                    Text(
+                        text = line.text,
+                        color = when {
+                            latest -> AppTextPrimary
+                            line.role == "user" -> AppAccentSoft.copy(alpha = 0.68f)
+                            else -> AppTextSecondary.copy(alpha = 0.62f)
+                        },
+                        style = if (latest) {
+                            MaterialTheme.typography.bodyLarge
+                        } else {
+                            MaterialTheme.typography.bodyMedium
+                        },
+                        textAlign = TextAlign.Center,
+                        maxLines = if (latest) 5 else 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = if (index == 0) 0.dp else 7.dp)
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.padding(top = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(if (error == null) AppAccentSoft else Color(0xFFFF7E8B))
+                )
+                Spacer(modifier = Modifier.width(7.dp))
+                Text(
+                    text = "$status  -  $voiceName",
+                    color = AppTextMuted,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveCameraPreview(
+    cameraFacing: VoiceCallCameraFacing,
+    onFrame: (ByteArray) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
+    }
+    DisposableEffect(lifecycleOwner, previewView, cameraFacing) {
+        val analysisExecutor = Executors.newSingleThreadExecutor()
+        val providerFuture = ProcessCameraProvider.getInstance(context)
+        val mainExecutor = ContextCompat.getMainExecutor(context)
+        var provider: ProcessCameraProvider? = null
+        var disposed = false
+        var lastFrameAt = 0L
+
+        providerFuture.addListener({
+            if (disposed) return@addListener
+            provider = runCatching { providerFuture.get() }.getOrNull()
+            val cameraProvider = provider ?: return@addListener
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
+            val analysis = ImageAnalysis.Builder()
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+                .also { useCase ->
+                    useCase.setAnalyzer(analysisExecutor) { image ->
+                        val now = System.currentTimeMillis()
+                        try {
+                            if (now - lastFrameAt >= 1_000L) {
+                                lastFrameAt = now
+                                cameraImageToJpeg(image)?.let(onFrame)
+                            }
+                        } finally {
+                            image.close()
+                        }
+                    }
+            }
+            runCatching {
+                val selector = when (cameraFacing) {
+                    VoiceCallCameraFacing.Front -> CameraSelector.DEFAULT_FRONT_CAMERA
+                    VoiceCallCameraFacing.Back -> CameraSelector.DEFAULT_BACK_CAMERA
+                }
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    selector,
+                    preview,
+                    analysis
+                )
+            }
+        }, mainExecutor)
+
+        onDispose {
+            disposed = true
+            provider?.unbindAll()
+            analysisExecutor.shutdownNow()
+        }
+    }
+
+    AndroidView(
+        factory = { previewView },
+        modifier = modifier
+    )
+}
+
+private fun cameraImageToJpeg(image: androidx.camera.core.ImageProxy): ByteArray? {
+    val plane = image.planes.firstOrNull() ?: return null
+    val width = image.width
+    val height = image.height
+    val rowPadding = plane.rowStride - plane.pixelStride * width
+    val paddedWidth = width + rowPadding / plane.pixelStride
+    val padded = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888)
+    plane.buffer.rewind()
+    padded.copyPixelsFromBuffer(plane.buffer)
+    val cropped = Bitmap.createBitmap(padded, 0, 0, width, height)
+    if (cropped !== padded) padded.recycle()
+    val matrix = Matrix().apply {
+        postRotate(image.imageInfo.rotationDegrees.toFloat())
+    }
+    val rotated = Bitmap.createBitmap(
+        cropped,
+        0,
+        0,
+        cropped.width,
+        cropped.height,
+        matrix,
+        true
+    )
+    if (rotated !== cropped) cropped.recycle()
+    return ByteArrayOutputStream().use { output ->
+        rotated.compress(Bitmap.CompressFormat.JPEG, 70, output)
+        rotated.recycle()
+        output.toByteArray()
+    }
+}
+
+@Composable
+private fun VoiceAvatar(
+    persona: PersonaUiState,
+    outerSize: Int,
+    imageSize: Int
+) {
+    val pulse by rememberInfiniteTransition(label = "voice-pulse").animateFloat(
+        initialValue = 0.84f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1400),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "voice-pulse-scale"
+    )
+    Box(
+        modifier = Modifier
+            .size(outerSize.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .scale(pulse)
+                .clip(CircleShape)
+                .border(2.dp, AppAccentSoft.copy(alpha = 0.72f), CircleShape)
+                .background(AppAccentDim.copy(alpha = 0.18f))
+        )
+        Avatar(
+            persona = persona,
+            size = imageSize,
+            modifier = Modifier.border(1.dp, Color.White.copy(alpha = 0.4f), CircleShape)
+        )
+    }
+}
+
+@Composable
+private fun VoiceWaveform(modifier: Modifier = Modifier) {
+    val phase by rememberInfiniteTransition(label = "voice-wave").animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "voice-wave-phase"
+    )
+    val bars = listOf(0.15f, 0.25f, 0.55f, 0.82f, 0.42f, 0.68f, 0.35f, 0.92f, 0.58f, 0.25f, 0.18f)
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        bars.forEachIndexed { index, base ->
+            val animated = (base + phase * if (index % 2 == 0) 0.34f else 0.18f).coerceIn(0.1f, 1f)
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 4.dp)
+                    .width(5.dp)
+                    .height((16 + animated * 54).dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(AppAccent.copy(alpha = 0.32f), AppAccentSoft, AppAccent.copy(alpha = 0.32f))
+                        )
+                    )
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoiceControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    selected: Boolean = false,
+    danger: Boolean = false,
+    onClick: () -> Unit
+) {
+    val color = when {
+        danger -> Color(0xFFFF405A)
+        selected -> AppAccent
+        else -> AppSurface2
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.width(68.dp)
+    ) {
+        Surface(
+            color = color,
+            shape = CircleShape,
+            border = BorderStroke(1.dp, if (danger) Color(0xFFFF6D7B) else AppAccent.copy(alpha = 0.55f)),
+            modifier = Modifier
+                .size(48.dp)
+                .clickable(onClick = onClick)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = Color.White,
+                modifier = Modifier.padding(12.dp)
+            )
+        }
+        Text(
+            text = label,
+            color = if (danger) Color(0xFFFF7E8B) else AppTextPrimary,
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 6.dp)
+        )
+    }
+}
+
+private fun formatCallDuration(seconds: Long): String {
+    val minutes = seconds / 60L
+    val remainder = seconds % 60L
+    return String.format(Locale.US, "%02d:%02d", minutes, remainder)
+}
+
+@Composable
 private fun ChatBackgroundLayer(background: ChatBackground) {
     when (background) {
         ChatBackground.DarkMode -> Box(
@@ -802,9 +1672,15 @@ private fun BackgroundImage(
 private fun ChatHeader(
     persona: PersonaUiState,
     groupMembers: List<GroupMember>,
+    sessionHeaderName: String,
+    sessionHeaderAvatarUri: android.net.Uri?,
+    sessionHeaderAvatarScale: Float,
+    sessionHeaderAvatarOffsetX: Float,
+    sessionHeaderAvatarOffsetY: Float,
     isOnline: Boolean,
     onOpenSessions: () -> Unit,
-    onOpenPersona: () -> Unit
+    onOpenPersona: () -> Unit,
+    onOpenVoiceCall: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -820,15 +1696,21 @@ private fun ChatHeader(
                 tint = AppAccentSoft
             )
         }
-        Avatar(
-            persona = persona,
+        SessionHeaderAvatar(
+            fallbackPersona = persona,
+            avatarUri = sessionHeaderAvatarUri,
+            avatarScale = sessionHeaderAvatarScale,
+            avatarOffsetX = sessionHeaderAvatarOffsetX,
+            avatarOffsetY = sessionHeaderAvatarOffsetY,
             size = 54,
             modifier = Modifier.clickable(onClick = onOpenPersona)
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = groupMembers.joinToString(" + ") { it.persona.displayName.ifBlank { "AI" } },
+                text = sessionHeaderName.ifBlank {
+                    groupMembers.joinToString(" + ") { it.persona.displayName.ifBlank { "AI" } }
+                },
                 style = MaterialTheme.typography.titleMedium,
                 color = AppTextPrimary,
                 maxLines = 1,
@@ -853,6 +1735,13 @@ private fun ChatHeader(
                 )
             }
         }
+        IconButton(onClick = onOpenVoiceCall) {
+            Icon(
+                imageVector = Icons.Rounded.Call,
+                contentDescription = "Start voice call",
+                tint = AppTextPrimary
+            )
+        }
         IconButton(onClick = onOpenPersona) {
             Icon(
                 imageVector = Icons.Rounded.MoreVert,
@@ -866,28 +1755,52 @@ private fun ChatHeader(
 @Composable
 private fun SessionDrawer(
     sessions: List<ChatSession>,
+    projects: List<ProjectUiState>,
     activeSessionId: String,
+    activeProject: ProjectUiState?,
     persona: PersonaUiState,
     appVersionLabel: String,
     onNewSession: () -> Unit,
+    onNewProject: () -> String,
     onSelectSession: (String) -> Unit,
+    onNewSessionInProject: (String) -> Unit,
+    onMoveSessionToProject: (String, String?) -> Unit,
+    onUpdateProjectName: (String, String) -> Unit,
+    onUpdateProjectDescription: (String, String) -> Unit,
+    onUpdateProjectInstruction: (String, String) -> Unit,
     onDeleteSession: (String) -> Unit,
-    onExportSession: (ChatSession) -> Unit,
+    onRenameSession: (String, String) -> Unit,
+    onCloneSession: (String) -> Unit,
+    onDuplicateSessionSettings: (String) -> Unit,
     onImportSession: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit,
     onClose: () -> Unit
 ) {
     var deleteTarget by remember { mutableStateOf<ChatSession?>(null) }
+    var actionTarget by remember { mutableStateOf<ChatSession?>(null) }
+    var renameTarget by remember { mutableStateOf<ChatSession?>(null) }
+    var renameDraft by remember { mutableStateOf("") }
+    var projectAssignmentTarget by remember { mutableStateOf<ChatSession?>(null) }
+    var addToProjectId by remember { mutableStateOf<String?>(null) }
     var sessionSearch by remember { mutableStateOf("") }
-    val filteredSessions = remember(sessions, sessionSearch) {
-        val query = sessionSearch.trim()
-        if (query.isBlank()) {
-            sessions
-        } else {
-            sessions.filter { session -> session.matchesSessionQuery(query) }
-        }
+    var projectSearch by remember { mutableStateOf("") }
+    var drawerSection by remember { mutableStateOf(DrawerSection.Chats) }
+    var selectedProjectId by remember { mutableStateOf<String?>(activeProject?.id) }
+    val selectedProject = selectedProjectId?.let { id -> projects.firstOrNull { it.id == id } }
+    val sessionQuery = sessionSearch.trim()
+    val filteredSessions = if (sessionQuery.isBlank()) {
+        sessions
+    } else {
+        sessions.filter { session -> session.matchesSessionQuery(sessionQuery) }
     }
+    val projectQuery = projectSearch.trim()
+    val filteredProjects = if (projectQuery.isBlank()) {
+        projects
+    } else {
+        projects.filter { project -> project.matchesProjectQuery(projectQuery) }
+    }
+    val activeProjectSessions = sessions.filter { it.projectId == selectedProjectId }
 
     Surface(
         modifier = Modifier
@@ -906,37 +1819,28 @@ private fun SessionDrawer(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(58.dp),
+                    .height(64.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Avatar(persona = persona, size = 42)
+                Image(
+                    painter = painterResource(id = R.drawable.app_icon_minimalist),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                )
                 Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Chats",
-                        color = AppTextPrimary,
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        text = persona.displayName,
-                        color = AppTextSecondary,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                Text(
+                    text = appVersionLabel.substringBefore(" v"),
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.weight(1f)
+                )
                 IconButton(onClick = onOpenSettings) {
                     Icon(
                         imageVector = Icons.Rounded.Settings,
                         contentDescription = "App settings",
-                        tint = AppTextPrimary
-                    )
-                }
-                IconButton(onClick = onOpenAbout) {
-                    Icon(
-                        imageVector = Icons.Rounded.Info,
-                        contentDescription = "About app",
-                        tint = AppTextPrimary
+                        tint = AppTextSecondary
                     )
                 }
                 IconButton(onClick = onClose) {
@@ -948,114 +1852,135 @@ private fun SessionDrawer(
                 }
             }
 
-            Button(
-                onClick = onNewSession,
-                colors = ButtonDefaults.buttonColors(containerColor = AppAccent),
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp),
+            DrawerActionRow(
+                iconRes = R.drawable.asset_chat,
+                label = "New chat",
+                highlighted = true,
+                onClick = onNewSession
+            )
+            DrawerActionRow(
+                iconRes = R.drawable.asset_session,
+                label = "Chats",
+                selected = drawerSection == DrawerSection.Chats,
+                onClick = {
+                    drawerSection = DrawerSection.Chats
+                    selectedProjectId = null
+                }
+            )
+            DrawerActionRow(
+                iconRes = R.drawable.asset_project,
+                label = "Projects",
+                selected = drawerSection == DrawerSection.Projects,
+                onClick = { drawerSection = DrawerSection.Projects }
+            )
+
+            when (drawerSection) {
+                DrawerSection.Chats -> {
+                    DrawerSearchField(
+                        value = sessionSearch,
+                        onValueChange = { sessionSearch = it },
+                        placeholder = "Search chats",
+                        modifier = Modifier.padding(top = 18.dp)
+                    )
+                    SectionHeader("Recents")
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filteredSessions, key = { it.id }) { session ->
+                            SessionRow(
+                                session = session,
+                                project = session.projectId?.let { id -> projects.firstOrNull { it.id == id } },
+                                selected = session.id == activeSessionId,
+                                onClick = { onSelectSession(session.id) },
+                                onLongPress = { actionTarget = session }
+                            )
+                        }
+                    }
+                }
+
+                DrawerSection.Projects -> {
+                    if (selectedProject == null) {
+                        DrawerSearchField(
+                            value = projectSearch,
+                            onValueChange = { projectSearch = it },
+                            placeholder = "Search projects",
+                            modifier = Modifier.padding(top = 14.dp)
+                        )
+                        SectionHeader("Projects")
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(filteredProjects, key = { it.id }) { project ->
+                                ProjectRow(
+                                    project = project,
+                                    chatCount = sessions.count { it.projectId == project.id },
+                                    selected = project.id == activeProject?.id,
+                                    onClick = {
+                                        selectedProjectId = project.id
+                                    }
+                                )
+                            }
+                        }
+                        Button(
+                            onClick = {
+                                selectedProjectId = onNewProject()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = AppAccent),
+                            shape = RoundedCornerShape(18.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Add,
+                                contentDescription = null,
+                                tint = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "New project",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+                    } else {
+                        ProjectDetailPanel(
+                            project = selectedProject,
+                            sessions = activeProjectSessions,
+                            activeSessionId = activeSessionId,
+                            modifier = Modifier.weight(1f),
+                            onBack = { selectedProjectId = null },
+                            onNameChange = { onUpdateProjectName(selectedProject.id, it) },
+                            onDescriptionChange = { onUpdateProjectDescription(selectedProject.id, it) },
+                            onInstructionChange = { onUpdateProjectInstruction(selectedProject.id, it) },
+                            onNewChat = { onNewSessionInProject(selectedProject.id) },
+                            onAddExistingChat = { addToProjectId = selectedProject.id },
+                            onSelectSession = onSelectSession,
+                            onSessionLongPress = { actionTarget = it }
+                        )
+                    }
+                }
+            }
+            TextButton(
+                onClick = onOpenAbout,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
-                    .padding(top = 10.dp)
+                    .padding(top = 8.dp, bottom = 2.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = null,
-                    tint = Color.White
-                )
-                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "New chat",
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelLarge
+                    text = appVersionLabel,
+                    color = AppTextMuted,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-
-            Surface(
-                color = AppSurface,
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, AppStroke),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .padding(top = 10.dp)
-                    .clickable(onClick = onImportSession)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.InsertDriveFile,
-                        contentDescription = null,
-                        tint = AppAccentSoft,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Import session",
-                        color = AppAccentSoft,
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                }
-            }
-
-            OutlinedTextField(
-                value = sessionSearch,
-                onValueChange = { sessionSearch = it },
-                singleLine = true,
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = null,
-                        tint = AppTextSecondary
-                    )
-                },
-                placeholder = {
-                    Text(text = "Search sessions", color = AppTextSecondary)
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 14.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = AppTextPrimary,
-                    unfocusedTextColor = AppTextPrimary,
-                    focusedBorderColor = AppAccent,
-                    unfocusedBorderColor = AppStroke,
-                    cursorColor = AppAccent,
-                    focusedContainerColor = AppSurface2,
-                    unfocusedContainerColor = AppSurface2
-                ),
-                shape = RoundedCornerShape(16.dp)
-            )
-
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(top = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                items(filteredSessions, key = { it.id }) { session ->
-                    SessionRow(
-                        session = session,
-                        selected = session.id == activeSessionId,
-                        onClick = { onSelectSession(session.id) },
-                        onExport = { onExportSession(session) },
-                        onDelete = { deleteTarget = session }
-                    )
-                }
-            }
-            Text(
-                text = appVersionLabel,
-                color = AppTextSecondary.copy(alpha = 0.78f),
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 12.dp, bottom = 4.dp)
-            )
         }
     }
 
@@ -1072,7 +1997,7 @@ private fun SessionDrawer(
             },
             text = {
                 Text(
-                    text = session.groupTitle().ifBlank { "This chat" },
+                    text = session.displayTitle(),
                     color = AppTextSecondary,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -1094,15 +2019,425 @@ private fun SessionDrawer(
             }
         )
     }
+
+    actionTarget?.let { session ->
+        SessionActionSheet(
+            session = session,
+            onDismiss = { actionTarget = null },
+            onDuplicate = {
+                onDuplicateSessionSettings(session.id)
+                actionTarget = null
+            },
+            onClone = {
+                onCloneSession(session.id)
+                actionTarget = null
+            },
+            onRename = {
+                renameTarget = session
+                renameDraft = session.displayTitle()
+                actionTarget = null
+            },
+            onMove = {
+                projectAssignmentTarget = session
+                actionTarget = null
+            },
+            onDelete = {
+                deleteTarget = session
+                actionTarget = null
+            }
+        )
+    }
+
+    projectAssignmentTarget?.let { session ->
+        ProjectAssignmentSheet(
+            session = session,
+            projects = projects,
+            onDismiss = { projectAssignmentTarget = null },
+            onSelectProject = { projectId ->
+                onMoveSessionToProject(session.id, projectId)
+                projectAssignmentTarget = null
+            }
+        )
+    }
+
+    addToProjectId?.let { projectId ->
+        projects.firstOrNull { it.id == projectId }?.let { project ->
+            AddChatsToProjectSheet(
+                project = project,
+                sessions = sessions.filter { it.projectId != project.id },
+                onDismiss = { addToProjectId = null },
+                onAdd = { sessionId ->
+                    onMoveSessionToProject(sessionId, project.id)
+                }
+            )
+        }
+    }
+
+    renameTarget?.let { session ->
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            containerColor = AppSurface,
+            title = {
+                Text(
+                    text = "Rename chat",
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            },
+            text = {
+                OutlinedTextField(
+                    value = renameDraft,
+                    onValueChange = { renameDraft = it.take(72) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = AppTextPrimary,
+                        unfocusedTextColor = AppTextPrimary,
+                        focusedBorderColor = AppAccent.copy(alpha = 0.7f),
+                        unfocusedBorderColor = AppStroke,
+                        cursorColor = AppAccent,
+                        focusedContainerColor = AppSurface2,
+                        unfocusedContainerColor = AppSurface2
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRenameSession(session.id, renameDraft)
+                        renameTarget = null
+                    }
+                ) {
+                    Text(text = "Rename", color = AppAccentSoft)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) {
+                    Text(text = "Cancel", color = AppTextSecondary)
+                }
+            }
+        )
+    }
 }
 
 @Composable
+private fun SessionActionSheet(
+    session: ChatSession,
+    onDismiss: () -> Unit,
+    onDuplicate: () -> Unit,
+    onClone: () -> Unit,
+    onRename: () -> Unit,
+    onMove: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.46f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            ),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        Surface(
+            color = AppSurface,
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+            border = BorderStroke(1.dp, AppStroke),
+            shadowElevation = 18.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {}
+                )
+        ) {
+            Column(
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .padding(horizontal = 18.dp, vertical = 14.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .width(42.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(AppStroke)
+                )
+                Text(
+                    text = session.displayTitle(),
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 18.dp, bottom = 10.dp)
+                )
+                ActionSheetRow(
+                    icon = Icons.Rounded.ContentCopy,
+                    label = "Copy settings only",
+                    onClick = onDuplicate
+                )
+                ActionSheetRow(
+                    icon = Icons.Rounded.ChatBubbleOutline,
+                    label = "Clone session",
+                    onClick = onClone
+                )
+                ActionSheetRow(
+                    icon = Icons.Rounded.Edit,
+                    label = "Rename",
+                    onClick = onRename
+                )
+                ActionSheetRow(
+                    icon = Icons.Rounded.InsertDriveFile,
+                    label = if (session.projectId == null) "Move to project" else "Change project",
+                    onClick = onMove
+                )
+                ActionSheetRow(
+                    icon = Icons.Rounded.DeleteOutline,
+                    label = "Delete",
+                    onClick = onDelete
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectAssignmentSheet(
+    session: ChatSession,
+    projects: List<ProjectUiState>,
+    onDismiss: () -> Unit,
+    onSelectProject: (String?) -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.5f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            ),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        Surface(
+            color = AppSurface,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            border = BorderStroke(1.dp, AppStroke),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {}
+                )
+        ) {
+            Column(
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .padding(18.dp)
+            ) {
+                Text(
+                    text = "Move ${session.displayTitle()}",
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "Choose where this chat belongs.",
+                    color = AppTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+                )
+                ProjectChoiceRow(
+                    label = "No project",
+                    selected = session.projectId == null,
+                    onClick = { onSelectProject(null) }
+                )
+                projects.forEach { project ->
+                    ProjectChoiceRow(
+                        label = project.name.ifBlank { "New project" },
+                        selected = session.projectId == project.id,
+                        onClick = { onSelectProject(project.id) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectChoiceRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = if (selected) AppAccentDim else Color.Transparent,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.InsertDriveFile,
+                contentDescription = null,
+                tint = if (selected) AppAccentSoft else AppTextSecondary
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = label,
+                color = AppTextPrimary,
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f)
+            )
+            if (selected) {
+                Icon(
+                    imageVector = Icons.Rounded.DoneAll,
+                    contentDescription = null,
+                    tint = AppAccentSoft
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddChatsToProjectSheet(
+    project: ProjectUiState,
+    sessions: List<ChatSession>,
+    onDismiss: () -> Unit,
+    onAdd: (String) -> Unit
+) {
+    var addedIds by remember(project.id) { mutableStateOf(emptySet<String>()) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.5f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            ),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        Surface(
+            color = AppSurface,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            border = BorderStroke(1.dp, AppStroke),
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.72f)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {}
+                )
+        ) {
+            Column(
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .padding(18.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Add chats",
+                            color = AppTextPrimary,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = project.name,
+                            color = AppTextSecondary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Done", color = AppAccentSoft)
+                    }
+                }
+                if (sessions.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Every chat is already in this project.",
+                            color = AppTextMuted,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(sessions, key = { it.id }) { session ->
+                            val added = session.id in addedIds
+                            Surface(
+                                color = if (added) AppAccentDim else AppSurface2,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, AppStroke),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !added) {
+                                        onAdd(session.id)
+                                        addedIds = addedIds + session.id
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = session.displayTitle(),
+                                            color = AppTextPrimary,
+                                            style = MaterialTheme.typography.labelLarge
+                                        )
+                                        Text(
+                                            text = session.preview,
+                                            color = AppTextSecondary,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = if (added) Icons.Rounded.DoneAll else Icons.Rounded.Add,
+                                        contentDescription = null,
+                                        tint = AppAccentSoft
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 private fun SessionRow(
     session: ChatSession,
+    project: ProjectUiState?,
     selected: Boolean,
     onClick: () -> Unit,
-    onExport: () -> Unit,
-    onDelete: () -> Unit
+    onLongPress: () -> Unit
 ) {
     Surface(
         color = if (selected) AppAccentDim.copy(alpha = 0.82f) else AppSurface,
@@ -1110,7 +2445,10 @@ private fun SessionRow(
         border = BorderStroke(1.dp, if (selected) AppAccent.copy(alpha = 0.6f) else AppStroke),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongPress
+            )
     ) {
         Row(
             modifier = Modifier.padding(14.dp),
@@ -1123,17 +2461,19 @@ private fun SessionRow(
                     .background(if (selected) AppAccent else AppSurface2),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.ChatBubbleOutline,
+                Image(
+                    painter = painterResource(id = R.drawable.asset_session),
                     contentDescription = null,
-                    tint = if (selected) Color.White else AppAccentSoft,
-                    modifier = Modifier.size(20.dp)
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
                 )
             }
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = session.groupTitle().ifBlank { "Unnamed chat" },
+                    text = session.displayTitle(),
                     color = AppTextPrimary,
                     style = MaterialTheme.typography.labelLarge,
                     maxLines = 1,
@@ -1146,28 +2486,28 @@ private fun SessionRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (project != null) {
+                    Text(
+                        text = project.name,
+                        color = AppAccentSoft,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
             Text(
                 text = session.updatedAt,
                 color = AppTextSecondary,
                 style = MaterialTheme.typography.bodyMedium
             )
-            IconButton(onClick = onExport) {
-                Icon(
-                    imageVector = Icons.Rounded.Upload,
-                    contentDescription = "Export session",
-                    tint = AppAccentSoft,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            IconButton(onClick = onDelete) {
-                Icon(
-                    imageVector = Icons.Rounded.DeleteOutline,
-                    contentDescription = "Delete session",
-                    tint = Color(0xFFFF8E9A),
-                    modifier = Modifier.size(20.dp)
-                )
-            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.Rounded.MoreVert,
+                contentDescription = "Session actions",
+                tint = AppTextSecondary,
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }
@@ -1175,40 +2515,112 @@ private fun SessionRow(
 @Composable
 private fun EmptyChatState(
     persona: PersonaUiState,
-    onCreatePersona: () -> Unit
+    onCreatePersona: () -> Unit,
+    onSuggestion: (String) -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 76.dp),
+            .padding(top = 58.dp, start = 12.dp, end = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Avatar(persona = persona, size = 96)
-        Spacer(modifier = Modifier.height(18.dp))
+        Avatar(persona = persona, size = 112)
+        Spacer(modifier = Modifier.height(22.dp))
         Text(
-            text = "Create your custom AI",
+            text = buildAnnotatedString {
+                append("Hi, I'm ")
+                withStyle(SpanStyle(color = AppAccentSoft, fontWeight = FontWeight.Bold)) {
+                    append(persona.displayName.ifBlank { "New Persona" })
+                }
+            },
             color = AppTextPrimary,
             style = MaterialTheme.typography.titleLarge,
             textAlign = TextAlign.Center
         )
         Text(
-            text = "No messages yet",
+            text = "How can I help you today?",
             color = AppTextSecondary,
             style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(top = 6.dp)
+            modifier = Modifier.padding(top = 8.dp)
         )
-        Button(
-            onClick = onCreatePersona,
-            colors = ButtonDefaults.buttonColors(containerColor = AppAccent),
-            shape = RoundedCornerShape(16.dp),
+
+        val suggestions = listOf(
+            "Tell me a story" to Icons.Rounded.InsertDriveFile,
+            "Help me write code" to Icons.Rounded.ContentCopy,
+            "Brainstorm ideas" to Icons.Rounded.StarBorder,
+            "Explain something" to Icons.Rounded.Info
+        )
+        Column(
             modifier = Modifier
-                .padding(top = 22.dp)
-                .height(52.dp)
+                .fillMaxWidth()
+                .padding(top = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            suggestions.chunked(2).forEach { rowItems ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    rowItems.forEach { (label, icon) ->
+                        SuggestionChip(
+                            label = label,
+                            icon = icon,
+                            onClick = { onSuggestion(label) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    if (rowItems.size == 1) {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+
+        TextButton(
+            onClick = onCreatePersona,
+            modifier = Modifier.padding(top = 10.dp)
         ) {
             Text(
                 text = "Edit persona",
-                color = Color.White,
+                color = AppAccentSoft,
                 style = MaterialTheme.typography.labelLarge
+            )
+        }
+    }
+}
+
+@Composable
+private fun SuggestionChip(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = AppSurface.copy(alpha = 0.72f),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, AppStroke),
+        modifier = modifier
+            .height(56.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = AppTextSecondary,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = label,
+                color = AppTextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -1324,13 +2736,36 @@ private fun AnimatedMessageBubble(
     message: ChatMessage,
     persona: PersonaUiState,
     groupMembers: List<GroupMember>,
+    animateText: Boolean,
+    onTextAnimationStart: (String) -> Unit,
     onOpenImage: (android.net.Uri) -> Unit,
     onMessageLongPress: (ChatMessage) -> Unit
 ) {
     var visible by remember(message.id) { mutableStateOf(false) }
+    var displayedContent by remember(message.id) {
+        mutableStateOf(if (animateText) "" else message.content)
+    }
 
     LaunchedEffect(message.id) {
         visible = true
+    }
+
+    LaunchedEffect(message.id, message.content, animateText) {
+        if (!animateText) {
+            displayedContent = message.content
+            return@LaunchedEffect
+        }
+        onTextAnimationStart(message.id)
+        if (displayedContent.length > message.content.length) {
+            displayedContent = ""
+        }
+        val chunkSize = (message.content.length / 90).coerceIn(2, 10)
+        var index = displayedContent.length
+        while (index < message.content.length) {
+            index = (index + chunkSize).coerceAtMost(message.content.length)
+            displayedContent = message.content.take(index)
+            delay(12)
+        }
     }
 
     AnimatedVisibility(
@@ -1343,6 +2778,7 @@ private fun AnimatedMessageBubble(
             message = message,
             persona = persona,
             groupMembers = groupMembers,
+            displayContent = displayedContent,
             onOpenImage = onOpenImage,
             onMessageLongPress = onMessageLongPress
         )
@@ -1355,6 +2791,7 @@ private fun MessageBubble(
     message: ChatMessage,
     persona: PersonaUiState,
     groupMembers: List<GroupMember>,
+    displayContent: String = message.content,
     onOpenImage: (android.net.Uri) -> Unit,
     onMessageLongPress: (ChatMessage) -> Unit
 ) {
@@ -1432,17 +2869,15 @@ private fun MessageBubble(
                             Spacer(modifier = Modifier.height(8.dp))
                         }
                     }
-                    if (message.content.isNotBlank()) {
+                    if (displayContent.isNotBlank()) {
                         Spacer(modifier = Modifier.height(12.dp))
                     }
                 }
-                val showText = message.content.isNotBlank() && !message.isImageLoading && message.remoteImageUrl == null
+                val showText = displayContent.isNotBlank() && !message.isImageLoading && message.remoteImageUrl == null
                 if (showText) {
-                    Text(
-                        text = formatMarkdownLite(message.content),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = AppTextPrimary,
-                        lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+                    MarkdownContent(
+                        input = displayContent,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
                 Spacer(modifier = Modifier.height(10.dp))
@@ -1468,6 +2903,345 @@ private fun MessageBubble(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DrawerActionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    iconRes: Int? = null,
+    label: String,
+    selected: Boolean = false,
+    highlighted: Boolean = false,
+    onClick: () -> Unit
+) {
+    val contentColor = if (highlighted || selected) AppAccentSoft else AppTextPrimary
+    Surface(
+        color = if (selected) AppSurface2 else Color.Transparent,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (iconRes != null) {
+                Image(
+                    painter = painterResource(id = iconRes),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                )
+            } else if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = contentColor,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(14.dp))
+            Text(
+                text = label,
+                color = contentColor,
+                style = MaterialTheme.typography.titleSmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun DrawerSearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        singleLine = true,
+        leadingIcon = {
+            Icon(
+                imageVector = Icons.Rounded.Search,
+                contentDescription = null,
+                tint = AppTextSecondary
+            )
+        },
+        placeholder = {
+            Text(text = placeholder, color = AppTextSecondary)
+        },
+        modifier = modifier.fillMaxWidth(),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = AppTextPrimary,
+            unfocusedTextColor = AppTextPrimary,
+            focusedBorderColor = AppAccent,
+            unfocusedBorderColor = AppStroke,
+            cursorColor = AppAccent,
+            focusedContainerColor = AppSurface2,
+            unfocusedContainerColor = AppSurface2
+        ),
+        shape = RoundedCornerShape(16.dp)
+    )
+}
+
+@Composable
+private fun SectionHeader(label: String) {
+    Text(
+        text = label,
+        color = AppTextSecondary,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.padding(top = 18.dp, bottom = 8.dp)
+    )
+}
+
+@Composable
+private fun ProjectRow(
+    project: ProjectUiState,
+    chatCount: Int,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = if (selected) AppSurface2 else Color.Transparent,
+        shape = RoundedCornerShape(14.dp),
+        border = if (selected) BorderStroke(1.dp, AppStroke) else null,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Image(
+                    painter = painterResource(id = R.drawable.asset_project),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = project.name.ifBlank { "New project" },
+                    color = AppTextPrimary,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (selected) {
+                    Icon(
+                        imageVector = Icons.Rounded.StarBorder,
+                        contentDescription = null,
+                        tint = AppAccentSoft,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            Text(
+                text = "$chatCount chats · Edited ${project.updatedAt}",
+                color = AppTextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProjectDetailPanel(
+    project: ProjectUiState,
+    sessions: List<ChatSession>,
+    activeSessionId: String,
+    modifier: Modifier = Modifier,
+    onBack: () -> Unit,
+    onNameChange: (String) -> Unit,
+    onDescriptionChange: (String) -> Unit,
+    onInstructionChange: (String) -> Unit,
+    onNewChat: () -> Unit,
+    onAddExistingChat: () -> Unit,
+    onSelectSession: (String) -> Unit,
+    onSessionLongPress: (ChatSession) -> Unit
+) {
+    var editVisible by remember(project.id) { mutableStateOf(false) }
+
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                    contentDescription = "Back to projects",
+                    tint = AppTextPrimary
+                )
+            }
+            Text(
+                text = "Project",
+                color = AppTextSecondary,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Text(
+            text = project.name.ifBlank { "New project" },
+            color = AppTextPrimary,
+            style = MaterialTheme.typography.headlineMedium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+        )
+        if (project.description.isNotBlank()) {
+            Text(
+                text = project.description,
+                color = AppTextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+        Surface(
+            color = AppSurface,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, AppStroke),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 18.dp)
+                .clickable { editVisible = true }
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Project instruction",
+                        color = AppTextPrimary,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Icon(
+                        imageVector = Icons.Rounded.Edit,
+                        contentDescription = "Edit project",
+                        tint = AppAccentSoft,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+                Text(
+                    text = project.instruction.ifBlank {
+                        "Add shared context and instructions for every chat in this project."
+                    },
+                    color = if (project.instruction.isBlank()) AppTextMuted else AppTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Button(
+                onClick = onNewChat,
+                colors = ButtonDefaults.buttonColors(containerColor = AppAccent),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(50.dp)
+            ) {
+                Icon(Icons.Rounded.Add, contentDescription = null, tint = Color.White)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("New chat", color = Color.White)
+            }
+            Button(
+                onClick = onAddExistingChat,
+                colors = ButtonDefaults.buttonColors(containerColor = AppSurface2),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(50.dp)
+            ) {
+                Icon(Icons.Rounded.InsertDriveFile, contentDescription = null, tint = AppAccentSoft)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Add chat", color = AppTextPrimary)
+            }
+        }
+        SectionHeader("Recent chats")
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(sessions, key = { it.id }) { session ->
+                SessionRow(
+                    session = session,
+                    project = project,
+                    selected = session.id == activeSessionId,
+                    onClick = { onSelectSession(session.id) },
+                    onLongPress = { onSessionLongPress(session) }
+                )
+            }
+        }
+    }
+
+    if (editVisible) {
+        AlertDialog(
+            onDismissRequest = { editVisible = false },
+            containerColor = AppSurface,
+            title = {
+                Text("Edit project", color = AppTextPrimary)
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedTextField(
+                        value = project.name,
+                        onValueChange = onNameChange,
+                        label = { Text("Project name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = project.description,
+                        onValueChange = onDescriptionChange,
+                        label = { Text("Description") },
+                        minLines = 2,
+                        maxLines = 4,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = project.instruction,
+                        onValueChange = onInstructionChange,
+                        label = { Text("Shared instruction") },
+                        minLines = 5,
+                        maxLines = 10,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { editVisible = false }) {
+                    Text("Done", color = AppAccentSoft)
+                }
+            }
+        )
     }
 }
 
@@ -1878,19 +3652,19 @@ private fun ChatToolsSheet(
                         .padding(top = 12.dp)
                 ) {
                     AttachmentOptionCard(
-                        icon = Icons.Rounded.CameraAlt,
+                        imageRes = R.drawable.tool_camera,
                         label = "Camera",
                         onClick = onCamera,
                         modifier = Modifier.weight(1f)
                     )
                     AttachmentOptionCard(
-                        icon = Icons.Rounded.Upload,
+                        imageRes = R.drawable.tool_photos,
                         label = "Photos",
                         onClick = onPhotos,
                         modifier = Modifier.weight(1f)
                     )
                     AttachmentOptionCard(
-                        icon = Icons.Rounded.InsertDriveFile,
+                        imageRes = R.drawable.tool_files,
                         label = "Files",
                         onClick = onFiles,
                         modifier = Modifier.weight(1f)
@@ -2148,7 +3922,7 @@ private fun PresetChoiceChip(
 
 @Composable
 private fun AttachmentOptionCard(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    imageRes: Int,
     label: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -2161,30 +3935,18 @@ private fun AttachmentOptionCard(
             .height(112.dp)
             .clickable(onClick = onClick)
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
+        Image(
+            painter = painterResource(imageRes),
+            contentDescription = label,
+            contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = AppTextPrimary,
-                modifier = Modifier.size(28.dp)
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = label,
-                color = AppTextPrimary,
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1
-            )
-        }
+        )
     }
 }
 
 @Composable
 private fun ChatInputBar(
+    placeholder: String,
     draft: String,
     isSending: Boolean,
     attachedImageUris: List<android.net.Uri>,
@@ -2204,8 +3966,8 @@ private fun ChatInputBar(
             .fillMaxWidth()
             .padding(horizontal = 18.dp, vertical = 6.dp),
         color = AppSurface2,
-        shape = RoundedCornerShape(28.dp),
-        border = BorderStroke(1.dp, AppAccent.copy(alpha = 0.65f)),
+        shape = RoundedCornerShape(32.dp),
+        border = BorderStroke(1.dp, AppAccent.copy(alpha = 0.42f)),
         shadowElevation = 8.dp
     ) {
         Column {
@@ -2230,17 +3992,24 @@ private fun ChatInputBar(
                     .padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = onOpenTools,
-                    modifier = Modifier.size(52.dp)
+                Surface(
+                    color = AppSurface,
+                    shape = CircleShape,
+                    border = BorderStroke(1.dp, AppStroke),
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clickable(onClick = onOpenTools)
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.AttachFile,
-                        contentDescription = "Open chat tools",
-                        tint = AppTextPrimary,
-                        modifier = Modifier.size(27.dp)
-                    )
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Rounded.Add,
+                            contentDescription = "Open chat tools",
+                            tint = AppTextPrimary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
                 }
+                Spacer(modifier = Modifier.width(8.dp))
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChange,
@@ -2251,6 +4020,14 @@ private fun ChatInputBar(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 52.dp, max = 150.dp),
+                    placeholder = {
+                        Text(
+                            text = placeholder,
+                            color = AppTextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = AppTextPrimary,
                         unfocusedTextColor = AppTextPrimary,
@@ -2261,6 +4038,22 @@ private fun ChatInputBar(
                         unfocusedContainerColor = Color.Transparent
                     )
                 )
+                Surface(
+                    color = AppSurface,
+                    shape = CircleShape,
+                    border = BorderStroke(1.dp, AppStroke),
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Rounded.Mic,
+                            contentDescription = "Voice input",
+                            tint = AppTextSecondary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
                 Button(
                     onClick = onSend,
                     enabled = (draft.isNotBlank() || attachedImageUris.isNotEmpty()) && !isSending,
@@ -2326,6 +4119,150 @@ private fun AttachedImageChip(
             )
         }
     }
+}
+
+@Composable
+private fun MarkdownContent(
+    input: String,
+    modifier: Modifier = Modifier
+) {
+    val blocks = remember(input) { parseMarkdownBlocks(input) }
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(9.dp)
+    ) {
+        blocks.forEach { block ->
+            when (block) {
+                is MarkdownBlock.Paragraph -> {
+                    Text(
+                        text = formatMarkdownLite(block.text),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = AppTextPrimary,
+                        lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+                    )
+                }
+
+                is MarkdownBlock.Table -> {
+                    MarkdownTable(block.rows)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownTable(rows: List<List<String>>) {
+    if (rows.isEmpty()) return
+    val columnCount = rows.maxOf { it.size }.coerceAtLeast(1)
+    val widths = remember(rows) {
+        List(columnCount) { column ->
+            val longest = rows.maxOf { row -> row.getOrNull(column)?.length ?: 0 }
+            when {
+                longest >= 26 -> 168.dp
+                longest >= 14 -> 122.dp
+                else -> 88.dp
+            }
+        }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .clip(RoundedCornerShape(12.dp))
+            .border(1.dp, AppStroke.copy(alpha = 0.8f), RoundedCornerShape(12.dp))
+    ) {
+        rows.forEachIndexed { rowIndex, row ->
+            Row {
+                for (column in 0 until columnCount) {
+                    val isHeader = rowIndex == 0
+                    Box(
+                        modifier = Modifier
+                            .width(widths[column])
+                            .heightIn(min = 42.dp)
+                            .background(if (isHeader) AppSurface.copy(alpha = 0.92f) else AppBackground.copy(alpha = 0.34f))
+                            .border(0.5.dp, AppStroke.copy(alpha = 0.58f))
+                            .padding(horizontal = 10.dp, vertical = 9.dp)
+                    ) {
+                        Text(
+                            text = formatMarkdownLite(row.getOrNull(column).orEmpty()),
+                            color = AppTextPrimary,
+                            style = if (isHeader) {
+                                MaterialTheme.typography.labelLarge
+                            } else {
+                                MaterialTheme.typography.bodyMedium
+                            },
+                            lineHeight = MaterialTheme.typography.bodyMedium.lineHeight,
+                            maxLines = 5,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private sealed class MarkdownBlock {
+    data class Paragraph(val text: String) : MarkdownBlock()
+    data class Table(val rows: List<List<String>>) : MarkdownBlock()
+}
+
+private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
+    val lines = input.trim().lines()
+    val blocks = mutableListOf<MarkdownBlock>()
+    var index = 0
+
+    while (index < lines.size) {
+        if (lines[index].isBlank()) {
+            index++
+            continue
+        }
+
+        if (index + 1 < lines.size && isMarkdownTableRow(lines[index]) && isMarkdownTableSeparator(lines[index + 1])) {
+            val rows = mutableListOf(parseMarkdownTableRow(lines[index]))
+            index += 2
+            while (index < lines.size && isMarkdownTableRow(lines[index])) {
+                rows += parseMarkdownTableRow(lines[index])
+                index++
+            }
+            blocks += MarkdownBlock.Table(rows)
+            continue
+        }
+
+        val paragraphLines = mutableListOf<String>()
+        while (index < lines.size && lines[index].isNotBlank()) {
+            if (index + 1 < lines.size && isMarkdownTableRow(lines[index]) && isMarkdownTableSeparator(lines[index + 1])) {
+                break
+            }
+            paragraphLines += lines[index]
+            index++
+        }
+        if (paragraphLines.isNotEmpty()) {
+            blocks += MarkdownBlock.Paragraph(paragraphLines.joinToString("\n"))
+        }
+    }
+
+    return blocks.ifEmpty { listOf(MarkdownBlock.Paragraph(input)) }
+}
+
+private fun isMarkdownTableRow(line: String): Boolean {
+    val trimmed = line.trim()
+    return trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.count { it == '|' } >= 2
+}
+
+private fun isMarkdownTableSeparator(line: String): Boolean {
+    if (!isMarkdownTableRow(line)) return false
+    return parseMarkdownTableRow(line).all { cell ->
+        cell.matches(Regex(":?-{3,}:?"))
+    }
+}
+
+private fun parseMarkdownTableRow(line: String): List<String> {
+    return line.trim()
+        .removePrefix("|")
+        .removeSuffix("|")
+        .split("|")
+        .map { it.trim() }
 }
 
 private fun formatMarkdownLite(input: String): AnnotatedString {
@@ -2398,9 +4335,18 @@ private fun AnnotatedString.Builder.appendDelimited(
 private fun PersonaSettingsSheet(
     persona: PersonaUiState,
     groupMembers: List<GroupMember>,
+    showSessionHeaderControls: Boolean,
+    sessionHeaderName: String,
+    sessionHeaderAvatarUri: android.net.Uri?,
+    sessionHeaderAvatarScale: Float,
+    sessionHeaderAvatarOffsetX: Float,
+    sessionHeaderAvatarOffsetY: Float,
     activeMemberId: String,
     responseRounds: Int,
     memoryEnabled: Boolean,
+    storyLore: String,
+    levelSystemEnabled: Boolean,
+    levelXp: Int,
     background: ChatBackground,
     moreOptions: Boolean,
     activeApiKeyLabel: String?,
@@ -2419,17 +4365,23 @@ private fun PersonaSettingsSheet(
     onRemoveMember: (String) -> Unit,
     onResponseRoundsChange: (Int) -> Unit,
     onMemoryEnabledChange: (Boolean) -> Unit,
+    onLevelSystemEnabledChange: (Boolean) -> Unit,
     onNameChange: (String) -> Unit,
+    onSessionHeaderNameChange: (String) -> Unit,
     onInstructionModeChange: (InstructionMode) -> Unit,
     onBeginnerRoleChange: (String) -> Unit,
     onBeginnerStyleChange: (String) -> Unit,
     onBeginnerLimitsChange: (String) -> Unit,
+    onStoryLoreChange: (String) -> Unit,
     onPromptChange: (String) -> Unit,
     onModelChange: (String) -> Unit,
     onSafetyLevelChange: (SafetyLevel) -> Unit,
+    onThinkingEffortChange: (GeminiThinkingEffort) -> Unit,
     onTemperatureChange: (Float) -> Unit,
     onAvatarChange: (android.net.Uri?) -> Unit,
     onAvatarTransform: (Float, Float, Float) -> Unit,
+    onSessionHeaderAvatarChange: (android.net.Uri?) -> Unit,
+    onSessionHeaderAvatarTransform: (Float, Float, Float) -> Unit,
     onBackgroundChange: (ChatBackground) -> Unit,
     onCustomBackgroundChange: (android.net.Uri?) -> Unit,
     onToggleMore: () -> Unit,
@@ -2451,9 +4403,14 @@ private fun PersonaSettingsSheet(
     onSave: () -> Unit
 ) {
     var instructionPromptExpanded by remember { mutableStateOf(true) }
+    var selectedSection by remember { mutableStateOf(PersonaSettingsSection.Context) }
     val imagePicker = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
         onResult = onAvatarChange
+    )
+    val sessionHeaderImagePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+        onResult = onSessionHeaderAvatarChange
     )
     val backgroundPicker = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
@@ -2495,100 +4452,164 @@ private fun PersonaSettingsSheet(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f)
                 )
-                Spacer(modifier = Modifier.size(48.dp))
+                TextButton(onClick = onSave) {
+                    Text(
+                        text = "Save",
+                        color = AppAccentSoft,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                }
             }
 
-            GroupEditor(
-                members = groupMembers,
-                activeMemberId = activeMemberId,
-                responseRounds = responseRounds,
-                onSelectMember = onSelectMember,
-                onAddMember = onAddMember,
-                onRemoveMember = onRemoveMember,
-                onResponseRoundsChange = onResponseRoundsChange
+            PersonaSettingsSectionTabs(
+                selected = selectedSection,
+                onSelect = { selectedSection = it }
             )
 
-            AvatarEditor(
-                persona = persona,
-                onUpload = { imagePicker.launch(arrayOf("image/*")) },
-                onTransform = onAvatarTransform
-            )
+            when (selectedSection) {
+                PersonaSettingsSection.Context -> {
+                    GroupEditor(
+                        members = groupMembers,
+                        activeMemberId = activeMemberId,
+                        responseRounds = responseRounds,
+                        onSelectMember = onSelectMember,
+                        onAddMember = onAddMember,
+                        onRemoveMember = onRemoveMember,
+                        onResponseRoundsChange = onResponseRoundsChange
+                    )
 
-            PersonaTextField(
-                label = "Display name",
-                value = persona.displayName,
-                onValueChange = onNameChange,
-                helper = "This is how your AI will appear in chats.",
-                counter = "${persona.displayName.length}/32",
-                singleLine = true
-            )
+                    InstructionSection(
+                        persona = persona,
+                        storyLore = storyLore,
+                        advancedExpanded = instructionPromptExpanded,
+                        onAdvancedExpandedChange = { instructionPromptExpanded = it },
+                        onModeChange = onInstructionModeChange,
+                        onBeginnerRoleChange = onBeginnerRoleChange,
+                        onBeginnerStyleChange = onBeginnerStyleChange,
+                        onBeginnerLimitsChange = onBeginnerLimitsChange,
+                        onStoryLoreChange = onStoryLoreChange,
+                        onAdvancedPromptChange = onPromptChange
+                    )
 
-            InstructionSection(
-                persona = persona,
-                advancedExpanded = instructionPromptExpanded,
-                onAdvancedExpandedChange = { instructionPromptExpanded = it },
-                onModeChange = onInstructionModeChange,
-                onBeginnerRoleChange = onBeginnerRoleChange,
-                onBeginnerStyleChange = onBeginnerStyleChange,
-                onBeginnerLimitsChange = onBeginnerLimitsChange,
-                onAdvancedPromptChange = onPromptChange
-            )
+                    SessionMemoryToggle(
+                        enabled = memoryEnabled,
+                        onEnabledChange = onMemoryEnabledChange
+                    )
 
-            SessionMemoryToggle(
-                enabled = memoryEnabled,
-                onEnabledChange = onMemoryEnabledChange
-            )
+                    SessionLevelSystem(
+                        enabled = levelSystemEnabled,
+                        xp = levelXp,
+                        onEnabledChange = onLevelSystemEnabledChange
+                    )
+                }
 
-            MoreOptions(
-                expanded = moreOptions,
-                persona = persona,
-                background = background,
-                activeApiKeyLabel = activeApiKeyLabel,
-                tavilyApiKeyLabel = tavilyApiKeyLabel,
-                rule34UserIdLabel = rule34UserIdLabel,
-                rule34ApiKeyLabel = rule34ApiKeyLabel,
-                elevenLabsApiKeyLabel = elevenLabsApiKeyLabel,
-                elevenLabsVoiceIdLabel = elevenLabsVoiceIdLabel,
-                elevenLabsModelIdLabel = elevenLabsModelIdLabel,
-                quotaUsage = quotaUsage,
-                dailyRequestLimit = dailyRequestLimit,
-                onToggle = onToggleMore,
-                onVendorChange = onVendorChange,
-                onModelChange = onModelChange,
-                onSafetyLevelChange = onSafetyLevelChange,
-                onTemperatureChange = onTemperatureChange,
-                onBackgroundChange = onBackgroundChange,
-                onPickCustomBackground = { backgroundPicker.launch(arrayOf("image/*")) },
-                onEditApiKey = onEditApiKey,
-                onClearApiKey = onClearApiKey,
-                onEditTavilyKey = onEditTavilyKey,
-                onClearTavilyKey = onClearTavilyKey,
-                onEditRule34UserId = onEditRule34UserId,
-                onClearRule34UserId = onClearRule34UserId,
-                onEditRule34ApiKey = onEditRule34ApiKey,
-                onClearRule34ApiKey = onClearRule34ApiKey,
-                onEditElevenLabsKey = onEditElevenLabsKey,
-                onClearElevenLabsKey = onClearElevenLabsKey,
-                onEditElevenLabsVoiceId = onEditElevenLabsVoiceId,
-                onClearElevenLabsVoiceId = onClearElevenLabsVoiceId,
-                onEditElevenLabsModelId = onEditElevenLabsModelId,
-                onClearElevenLabsModelId = onClearElevenLabsModelId
-            )
+                PersonaSettingsSection.Ui -> {
+                    if (showSessionHeaderControls) {
+                        Text(
+                            text = "Session header",
+                            color = AppTextPrimary,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(top = 12.dp)
+                        )
+                        Text(
+                            text = "Changes the group name and top avatar without editing any AI member.",
+                            color = AppTextSecondary,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
 
-            Button(
-                onClick = onSave,
-                colors = ButtonDefaults.buttonColors(containerColor = AppAccent),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .padding(top = 16.dp)
-            ) {
-                Text(
-                    text = "Save Persona",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Color.White
-                )
+                        SessionHeaderAvatarEditor(
+                            fallbackPersona = persona,
+                            avatarUri = sessionHeaderAvatarUri,
+                            avatarScale = sessionHeaderAvatarScale,
+                            avatarOffsetX = sessionHeaderAvatarOffsetX,
+                            avatarOffsetY = sessionHeaderAvatarOffsetY,
+                            onUpload = { sessionHeaderImagePicker.launch(arrayOf("image/*")) },
+                            onTransform = onSessionHeaderAvatarTransform
+                        )
+
+                        PersonaTextField(
+                            label = "Session name",
+                            value = sessionHeaderName,
+                            onValueChange = onSessionHeaderNameChange,
+                            helper = "This only changes the group header.",
+                            placeholder = groupMembers.joinToString(" + ") {
+                                it.persona.displayName.ifBlank { "AI" }
+                            },
+                            counter = "${sessionHeaderName.length}/72",
+                            singleLine = true
+                        )
+
+                        Text(
+                            text = "Active AI",
+                            color = AppTextPrimary,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+
+                    AvatarEditor(
+                        persona = persona,
+                        onUpload = { imagePicker.launch(arrayOf("image/*")) },
+                        onTransform = onAvatarTransform
+                    )
+
+                    PersonaTextField(
+                        label = "Display name",
+                        value = persona.displayName,
+                        onValueChange = onNameChange,
+                        helper = "This is how your AI will appear in chats.",
+                        counter = "${persona.displayName.length}/32",
+                        singleLine = true
+                    )
+
+                    BackgroundOptions(
+                        selected = background,
+                        onBackgroundChange = onBackgroundChange,
+                        onPickCustomBackground = { backgroundPicker.launch(arrayOf("image/*")) }
+                    )
+                }
+
+                PersonaSettingsSection.ApiVault -> {
+                    MoreOptions(
+                        expanded = true,
+                        showHeader = false,
+                        showBackground = false,
+                        persona = persona,
+                        background = background,
+                        activeApiKeyLabel = activeApiKeyLabel,
+                        tavilyApiKeyLabel = tavilyApiKeyLabel,
+                        rule34UserIdLabel = rule34UserIdLabel,
+                        rule34ApiKeyLabel = rule34ApiKeyLabel,
+                        elevenLabsApiKeyLabel = elevenLabsApiKeyLabel,
+                        elevenLabsVoiceIdLabel = elevenLabsVoiceIdLabel,
+                        elevenLabsModelIdLabel = elevenLabsModelIdLabel,
+                        quotaUsage = quotaUsage,
+                        dailyRequestLimit = dailyRequestLimit,
+                        onToggle = onToggleMore,
+                        onVendorChange = onVendorChange,
+                        onModelChange = onModelChange,
+                        onSafetyLevelChange = onSafetyLevelChange,
+                        onThinkingEffortChange = onThinkingEffortChange,
+                        onTemperatureChange = onTemperatureChange,
+                        onBackgroundChange = onBackgroundChange,
+                        onPickCustomBackground = { backgroundPicker.launch(arrayOf("image/*")) },
+                        onEditApiKey = onEditApiKey,
+                        onClearApiKey = onClearApiKey,
+                        onEditTavilyKey = onEditTavilyKey,
+                        onClearTavilyKey = onClearTavilyKey,
+                        onEditRule34UserId = onEditRule34UserId,
+                        onClearRule34UserId = onClearRule34UserId,
+                        onEditRule34ApiKey = onEditRule34ApiKey,
+                        onClearRule34ApiKey = onClearRule34ApiKey,
+                        onEditElevenLabsKey = onEditElevenLabsKey,
+                        onClearElevenLabsKey = onClearElevenLabsKey,
+                        onEditElevenLabsVoiceId = onEditElevenLabsVoiceId,
+                        onClearElevenLabsVoiceId = onClearElevenLabsVoiceId,
+                        onEditElevenLabsModelId = onEditElevenLabsModelId,
+                        onClearElevenLabsModelId = onClearElevenLabsModelId
+                    )
+                }
             }
 
             TextButton(
@@ -2600,6 +4621,43 @@ private fun PersonaSettingsSheet(
                 Text(
                     text = "Delete this session",
                     color = Color(0xFFFF7E8B)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PersonaSettingsSectionTabs(
+    selected: PersonaSettingsSection,
+    onSelect: (PersonaSettingsSection) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 12.dp)
+    ) {
+        PersonaSettingsSection.entries.forEach { section ->
+            val isSelected = selected == section
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable { onSelect(section) }
+                    .padding(top = 8.dp)
+            ) {
+                Text(
+                    text = section.label,
+                    color = if (isSelected) AppAccentSoft else AppTextPrimary,
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .background(if (isSelected) AppAccent else AppStroke.copy(alpha = 0.45f))
                 )
             }
         }
@@ -2622,67 +4680,75 @@ private fun GroupEditor(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "AI members",
+                text = "AI MEMBERS (${members.size}/4)",
                 color = AppTextPrimary,
                 style = MaterialTheme.typography.labelLarge,
                 modifier = Modifier.weight(1f)
             )
-            Text(
-                text = "${members.size}/4",
-                color = AppTextSecondary,
-                style = MaterialTheme.typography.bodyMedium
-            )
         }
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(top = 10.dp)
+        Surface(
+            color = AppSurface,
+            shape = RoundedCornerShape(18.dp),
+            border = BorderStroke(1.dp, AppStroke),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 10.dp)
         ) {
-            items(members, key = { it.id }) { member ->
-                GroupMemberChip(
-                    member = member,
-                    selected = member.id == activeMemberId,
-                    canRemove = members.size > 1,
-                    onSelect = { onSelectMember(member.id) },
-                    onRemove = { onRemoveMember(member.id) }
-                )
-            }
-            if (members.size < 4) {
-                item {
-                    Surface(
-                        shape = RoundedCornerShape(999.dp),
-                        color = AppSurface2,
-                        border = BorderStroke(1.dp, AppStroke),
+            Column {
+                members.forEachIndexed { index, member ->
+                    GroupMemberRow(
+                        member = member,
+                        selected = member.id == activeMemberId,
+                        canRemove = members.size > 1,
+                        onSelect = { onSelectMember(member.id) },
+                        onRemove = { onRemoveMember(member.id) }
+                    )
+                    if (index != members.lastIndex) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(1.dp)
+                                .background(AppStroke.copy(alpha = 0.48f))
+                        )
+                    }
+                }
+                if (members.size < 4) {
+                    Box(
                         modifier = Modifier
-                            .height(44.dp)
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(AppStroke.copy(alpha = 0.48f))
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
                             .clickable(onClick = onAddMember)
+                            .padding(horizontal = 14.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Add,
-                                contentDescription = null,
-                                tint = AppAccentSoft,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Add AI",
-                                color = AppAccentSoft,
-                                style = MaterialTheme.typography.labelLarge
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Rounded.Add,
+                            contentDescription = null,
+                            tint = AppAccentSoft,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Add AI member",
+                            color = AppAccentSoft,
+                            style = MaterialTheme.typography.labelLarge
+                        )
                     }
                 }
             }
         }
 
         Text(
-            text = "AI turns $responseRounds",
+            text = "AI TURNS",
             color = AppTextPrimary,
             style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(top = 16.dp)
+            modifier = Modifier.padding(top = 18.dp)
         )
         Slider(
             value = responseRounds.toFloat(),
@@ -2700,27 +4766,23 @@ private fun GroupEditor(
 }
 
 @Composable
-private fun GroupMemberChip(
+private fun GroupMemberRow(
     member: GroupMember,
     selected: Boolean,
     canRemove: Boolean,
     onSelect: () -> Unit,
     onRemove: () -> Unit
 ) {
-    Surface(
-        shape = RoundedCornerShape(999.dp),
-        color = if (selected) AppAccentDim else AppSurface2,
-        border = BorderStroke(1.dp, if (selected) AppAccent else AppStroke),
+    Row(
         modifier = Modifier
-            .height(44.dp)
+            .fillMaxWidth()
             .clickable(onClick = onSelect)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 8.dp, end = if (canRemove) 4.dp else 12.dp)
-        ) {
-            Avatar(persona = member.persona, size = 28)
-            Spacer(modifier = Modifier.width(8.dp))
+        Avatar(persona = member.persona, size = 38)
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = member.persona.displayName,
                 color = if (selected) AppAccentSoft else AppTextPrimary,
@@ -2728,20 +4790,133 @@ private fun GroupMemberChip(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            if (canRemove) {
-                IconButton(
-                    onClick = onRemove,
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = "Remove AI",
-                        tint = Color(0xFFFFA0AA),
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 3.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2ECC71))
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Online",
+                    color = AppTextMuted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
         }
+        if (canRemove) {
+            IconButton(onClick = onRemove) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = "Remove AI",
+                    tint = Color(0xFFFFA0AA),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        } else {
+            Icon(
+                imageVector = Icons.Rounded.MoreVert,
+                contentDescription = null,
+                tint = AppTextSecondary,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SessionHeaderAvatarEditor(
+    fallbackPersona: PersonaUiState,
+    avatarUri: android.net.Uri?,
+    avatarScale: Float,
+    avatarOffsetX: Float,
+    avatarOffsetY: Float,
+    onUpload: () -> Unit,
+    onTransform: (Float, Float, Float) -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp, bottom = 20.dp)
+    ) {
+        Box(contentAlignment = Alignment.BottomEnd) {
+            Box(
+                modifier = Modifier
+                    .size(150.dp)
+                    .clip(CircleShape)
+                    .pointerInput(avatarUri) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            onTransform(zoom, pan.x, pan.y)
+                        }
+                    }
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(AppAccentSoft.copy(alpha = 0.45f), AppSurface2)
+                        )
+                    )
+                    .border(3.dp, AppAccentSoft, CircleShape)
+                    .padding(4.dp)
+            ) {
+                SessionHeaderAvatar(
+                    fallbackPersona = fallbackPersona,
+                    avatarUri = avatarUri,
+                    avatarScale = avatarScale,
+                    avatarOffsetX = avatarOffsetX,
+                    avatarOffsetY = avatarOffsetY,
+                    size = 142,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            IconButton(
+                onClick = onUpload,
+                modifier = Modifier
+                    .offset(x = 2.dp, y = 2.dp)
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(AppSurface2)
+                    .border(1.dp, AppStroke, CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Upload,
+                    contentDescription = "Upload session avatar",
+                    tint = AppAccentSoft
+                )
+            }
+        }
+
+        Button(
+            onClick = onUpload,
+            colors = ButtonDefaults.buttonColors(containerColor = AppSurface),
+            border = BorderStroke(1.dp, AppStroke),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 18.dp)
+                .height(54.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Upload,
+                contentDescription = null,
+                tint = AppAccentSoft
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "Upload session avatar",
+                color = AppAccentSoft,
+                style = MaterialTheme.typography.labelLarge
+            )
+        }
+        Text(
+            text = "JPG, PNG or WebP. Pinch and drag to crop.",
+            color = AppTextSecondary,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(top = 8.dp)
+        )
     }
 }
 
@@ -2835,6 +5010,7 @@ private fun PersonaTextField(
     value: String,
     onValueChange: (String) -> Unit,
     helper: String,
+    placeholder: String? = null,
     counter: String? = null,
     singleLine: Boolean,
     minLines: Int = 1
@@ -2869,6 +5045,15 @@ private fun PersonaTextField(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = if (hasHeader) 8.dp else 0.dp),
+            placeholder = placeholder?.let { placeholderText ->
+                {
+                    Text(
+                        text = placeholderText,
+                        color = AppTextMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            },
             shape = RoundedCornerShape(16.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = AppTextPrimary,
@@ -2892,12 +5077,14 @@ private fun PersonaTextField(
 @Composable
 private fun InstructionSection(
     persona: PersonaUiState,
+    storyLore: String,
     advancedExpanded: Boolean,
     onAdvancedExpandedChange: (Boolean) -> Unit,
     onModeChange: (InstructionMode) -> Unit,
     onBeginnerRoleChange: (String) -> Unit,
     onBeginnerStyleChange: (String) -> Unit,
     onBeginnerLimitsChange: (String) -> Unit,
+    onStoryLoreChange: (String) -> Unit,
     onAdvancedPromptChange: (String) -> Unit
 ) {
     Column(modifier = Modifier.padding(bottom = 18.dp)) {
@@ -2921,6 +5108,17 @@ private fun InstructionSection(
             }
         }
 
+        PersonaTextField(
+            label = "Story lore",
+            value = storyLore,
+            onValueChange = onStoryLoreChange,
+            helper = "Shared by every AI in this session: its canon, rules, locations, factions, and how the world works.",
+            placeholder = "Describe the world and the rules that govern it.",
+            counter = "${storyLore.length}/16000",
+            singleLine = false,
+            minLines = 4
+        )
+
         AnimatedVisibility(visible = persona.instructionMode == InstructionMode.Beginner) {
             Column(modifier = Modifier.padding(top = 14.dp)) {
                 PersonaTextField(
@@ -2928,6 +5126,7 @@ private fun InstructionSection(
                     value = persona.beginnerRole,
                     onValueChange = onBeginnerRoleChange,
                     helper = "Who this persona is, what they know, and how they relate to you.",
+                    placeholder = "Who this persona is, what they know, and how they relate to you.",
                     singleLine = false,
                     minLines = 2
                 )
@@ -2936,6 +5135,7 @@ private fun InstructionSection(
                     value = persona.beginnerStyle,
                     onValueChange = onBeginnerStyleChange,
                     helper = "Tone, message length, speaking quirks, and roleplay texture.",
+                    placeholder = "Tone, message length, speaking quirks, and roleplay texture.",
                     singleLine = false,
                     minLines = 2
                 )
@@ -3099,6 +5299,96 @@ private fun SessionMemoryToggle(
 }
 
 @Composable
+private fun SessionLevelSystem(
+    enabled: Boolean,
+    xp: Int,
+    onEnabledChange: (Boolean) -> Unit
+) {
+    val state = sessionLevelState(xp)
+    Surface(
+        color = AppSurface,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, AppStroke),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 18.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Relationship level",
+                        color = AppTextPrimary,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Text(
+                        text = "10 XP per text message. Progress is unique to this session.",
+                        color = AppTextSecondary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 3.dp)
+                    )
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = onEnabledChange
+                )
+            }
+
+            AnimatedVisibility(visible = enabled) {
+                Column(modifier = Modifier.padding(top = 14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Level ${state.level}",
+                            color = AppAccentSoft,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Text(
+                            text = "${state.xp}/1500 XP",
+                            color = AppTextSecondary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Text(
+                        text = state.label,
+                        color = AppTextPrimary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp)
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(AppSurface2)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(state.progress)
+                                .fillMaxHeight()
+                                .background(AppAccent)
+                        )
+                    }
+                    Text(
+                        text = if (state.level >= 10) {
+                            "Maximum level reached"
+                        } else {
+                            "${state.nextLevelXp - state.xp} XP to Level ${state.level + 1}"
+                        },
+                        color = AppTextSecondary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 7.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun TraitChips(traits: List<String>) {
     val icons = listOf(
         Icons.Rounded.FavoriteBorder,
@@ -3141,6 +5431,8 @@ private fun TraitChips(traits: List<String>) {
 @Composable
 private fun MoreOptions(
     expanded: Boolean,
+    showHeader: Boolean = true,
+    showBackground: Boolean = true,
     persona: PersonaUiState,
     background: ChatBackground,
     activeApiKeyLabel: String?,
@@ -3156,6 +5448,7 @@ private fun MoreOptions(
     onVendorChange: (ApiVendor) -> Unit,
     onModelChange: (String) -> Unit,
     onSafetyLevelChange: (SafetyLevel) -> Unit,
+    onThinkingEffortChange: (GeminiThinkingEffort) -> Unit,
     onTemperatureChange: (Float) -> Unit,
     onBackgroundChange: (ChatBackground) -> Unit,
     onPickCustomBackground: () -> Unit,
@@ -3181,28 +5474,30 @@ private fun MoreOptions(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onToggle),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "More options",
-                    color = AppTextPrimary,
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.weight(1f)
-                )
-                Icon(
-                    imageVector = Icons.Rounded.ExpandMore,
-                    contentDescription = null,
-                    tint = AppTextSecondary,
-                    modifier = Modifier.alpha(if (expanded) 1f else 0.82f)
-                )
+            if (showHeader) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onToggle),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "More options",
+                        color = AppTextPrimary,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Icon(
+                        imageVector = Icons.Rounded.ExpandMore,
+                        contentDescription = null,
+                        tint = AppTextSecondary,
+                        modifier = Modifier.alpha(if (expanded) 1f else 0.82f)
+                    )
+                }
             }
 
             AnimatedVisibility(visible = expanded) {
-                Column(modifier = Modifier.padding(top = 16.dp)) {
+                Column(modifier = Modifier.padding(top = if (showHeader) 16.dp else 0.dp)) {
                     VendorDropdown(
                         selected = persona.vendor,
                         onVendorChange = onVendorChange
@@ -3213,6 +5508,14 @@ private fun MoreOptions(
                         selected = persona.model,
                         onModelChange = onModelChange
                     )
+                    if (persona.vendor == ApiVendor.Google) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        ThinkingEffortDropdown(
+                            selected = persona.thinkingEffort,
+                            onThinkingEffortChange = onThinkingEffortChange
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
                     SafetyDropdown(
                         selected = persona.safetyLevel,
                         enabled = persona.vendor == ApiVendor.Google,
@@ -3231,11 +5534,13 @@ private fun MoreOptions(
                         steps = 19,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    BackgroundOptions(
-                        selected = background,
-                        onBackgroundChange = onBackgroundChange,
-                        onPickCustomBackground = onPickCustomBackground
-                    )
+                    if (showBackground) {
+                        BackgroundOptions(
+                            selected = background,
+                            onBackgroundChange = onBackgroundChange,
+                            onPickCustomBackground = onPickCustomBackground
+                        )
+                    }
                     ApiKeySummary(
                         activeApiKeyLabel = activeApiKeyLabel,
                         tavilyApiKeyLabel = tavilyApiKeyLabel,
@@ -3370,14 +5675,26 @@ private fun ChatSession.groupTitle(): String {
     return members.joinToString(" + ") { it.persona.displayName.ifBlank { "AI" } }
 }
 
+private fun ChatSession.displayTitle(): String {
+    return title.ifBlank { groupTitle().ifBlank { "Unnamed chat" } }
+}
+
 private fun ChatSession.matchesSessionQuery(query: String): Boolean {
     val normalized = query.lowercase(Locale.getDefault())
+    if (title.lowercase(Locale.getDefault()).contains(normalized)) return true
     if (groupTitle().lowercase(Locale.getDefault()).contains(normalized)) return true
     if (preview.lowercase(Locale.getDefault()).contains(normalized)) return true
     return messages.any { message ->
         message.content.lowercase(Locale.getDefault()).contains(normalized) ||
             message.speakerName.orEmpty().lowercase(Locale.getDefault()).contains(normalized)
     }
+}
+
+private fun ProjectUiState.matchesProjectQuery(query: String): Boolean {
+    val normalized = query.lowercase(Locale.getDefault())
+    return name.lowercase(Locale.getDefault()).contains(normalized) ||
+        description.lowercase(Locale.getDefault()).contains(normalized) ||
+        instruction.lowercase(Locale.getDefault()).contains(normalized)
 }
 
 @Composable
@@ -3686,6 +6003,12 @@ private fun AppSettingsDialog(
                     text = "Memory",
                     color = AppTextPrimary,
                     style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                Text(
+                    text = "Stored ${globalMemoryBlock.length} / 64,000 chars. Up to 24,000 chars are injected per request.",
+                    color = AppTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
                 OutlinedTextField(
@@ -4197,6 +6520,30 @@ private fun SafetyDropdown(
 }
 
 @Composable
+private fun ThinkingEffortDropdown(
+    selected: GeminiThinkingEffort,
+    onThinkingEffortChange: (GeminiThinkingEffort) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    LabeledMenuBox(
+        label = "Thinking level",
+        value = selected.label,
+        expanded = expanded,
+        onExpandedChange = { expanded = it }
+    ) {
+        GeminiThinkingEffort.entries.forEach { effort ->
+            DropdownMenuItem(
+                text = { Text(text = effort.label, color = AppTextPrimary) },
+                onClick = {
+                    onThinkingEffortChange(effort)
+                    expanded = false
+                }
+            )
+        }
+    }
+}
+
+@Composable
 private fun ModelDropdown(
     vendor: ApiVendor,
     selected: String,
@@ -4276,6 +6623,47 @@ private fun LabeledMenuBox(
 }
 
 @Composable
+private fun SessionHeaderAvatar(
+    fallbackPersona: PersonaUiState,
+    avatarUri: android.net.Uri?,
+    avatarScale: Float,
+    avatarOffsetX: Float,
+    avatarOffsetY: Float,
+    size: Int,
+    modifier: Modifier = Modifier
+) {
+    if (avatarUri == null) {
+        Avatar(
+            persona = fallbackPersona,
+            size = size,
+            modifier = modifier
+        )
+        return
+    }
+
+    Box(
+        modifier = modifier
+            .size(size.dp)
+            .aspectRatio(1f)
+            .clip(CircleShape)
+    ) {
+        Image(
+            painter = rememberAsyncImagePainter(avatarUri),
+            contentDescription = "Session avatar",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(
+                    scaleX = avatarScale,
+                    scaleY = avatarScale,
+                    translationX = avatarOffsetX,
+                    translationY = avatarOffsetY
+                )
+        )
+    }
+}
+
+@Composable
 private fun Avatar(
     persona: PersonaUiState,
     size: Int,
@@ -4306,13 +6694,5 @@ private fun Avatar(
                     translationY = persona.avatarOffsetY
                 )
         )
-    }
-}
-
-@Preview
-@Composable
-private fun CompanionChatPreview() {
-    AIChatTheme {
-        CompanionChatApp()
     }
 }

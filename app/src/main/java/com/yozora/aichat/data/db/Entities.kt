@@ -12,16 +12,26 @@ data class PersonaEntity(
     val avatarUri: String?,
     val systemPrompt: String,
     val model: String,
-    val temperature: Float = 1.0f
+    val temperature: Float = 1.0f,
+    val thinkingBudget: Int? = null
 )
 
 @Entity(tableName = "sessions")
 data class ChatSessionEntity(
     @PrimaryKey val id: String,
+    val title: String = "",
+    val headerAvatarUri: String? = null,
+    val headerAvatarScale: Float = 1.0f,
+    val headerAvatarOffsetX: Float = 0f,
+    val headerAvatarOffsetY: Float = 0f,
     val personaJson: String,
     val activeMemberId: String,
     val responseRounds: Int,
     val memoryEnabled: Boolean = true,
+    val storyLore: String = "",
+    val levelSystemEnabled: Boolean = false,
+    val levelXp: Int = 0,
+    val projectId: String? = null,
     val backgroundJson: String,
     val preview: String,
     val updatedAt: String,

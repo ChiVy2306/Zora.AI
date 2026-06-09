@@ -13,15 +13,16 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-val AppBackground = Color(0xFF090A12)
-val AppSurface = Color(0xFF11131D)
-val AppSurface2 = Color(0xFF1A1C27)
-val AppStroke = Color(0xFF343545)
-val AppAccent = Color(0xFF7C5CFF)
-val AppAccentSoft = Color(0xFFA98CFF)
-val AppAccentDim = Color(0xFF211A3B)
-val AppTextPrimary = Color(0xFFF4F2FF)
-val AppTextSecondary = Color(0xFFB4B0C8)
+val AppBackground = Color(0xFF080A10)
+val AppSurface = Color(0xFF121722)
+val AppSurface2 = Color(0xFF171B28)
+val AppStroke = Color(0xFF262B3A)
+val AppAccent = Color(0xFF8B5CF6)
+val AppAccentSoft = Color(0xFFC4B5FD)
+val AppAccentDim = Color(0x292B174C)
+val AppTextPrimary = Color(0xFFF4F1FF)
+val AppTextSecondary = Color(0xFFA9A4B8)
+val AppTextMuted = Color(0xFF6F6A80)
 
 private val DarkColors: ColorScheme = darkColorScheme(
     primary = AppAccent,

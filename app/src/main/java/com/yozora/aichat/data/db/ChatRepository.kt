@@ -7,6 +7,7 @@ import com.yozora.aichat.ui.chat.ChatBackground
 import com.yozora.aichat.ui.chat.ChatMessage
 import com.yozora.aichat.ui.chat.ChatSession
 import com.yozora.aichat.ui.chat.GroupMember
+import com.yozora.aichat.ui.chat.GeminiThinkingEffort
 import com.yozora.aichat.ui.chat.InstructionMode
 import com.yozora.aichat.ui.chat.PersonaUiState
 import com.yozora.aichat.ui.chat.SafetyLevel
@@ -21,7 +22,8 @@ class ChatRepository private constructor(
 
     suspend fun loadSessions(): List<ChatSession> {
         return dao.sessions().map { sessionEntity ->
-            val members = dao.membersForSession(sessionEntity.id)
+            val storedMembers = dao.membersForSession(sessionEntity.id)
+            val members = storedMembers
                 .map { it.toGroupMember() }
                 .ifEmpty {
                     listOf(GroupMember(persona = sessionEntity.personaJson.toPersonaUiState()))
@@ -34,11 +36,25 @@ class ChatRepository private constructor(
 
             ChatSession(
                 id = sessionEntity.id,
+                title = sessionEntity.title,
+                headerAvatarUri = sessionEntity.headerAvatarUri?.let(Uri::parse),
+                headerAvatarScale = sessionEntity.headerAvatarScale,
+                headerAvatarOffsetX = sessionEntity.headerAvatarOffsetX,
+                headerAvatarOffsetY = sessionEntity.headerAvatarOffsetY,
                 persona = activePersona,
                 members = members,
                 activeMemberId = activeId,
                 responseRounds = sessionEntity.responseRounds.coerceIn(1, 3),
                 memoryEnabled = sessionEntity.memoryEnabled,
+                storyLore = sessionEntity.storyLore.ifBlank {
+                    sequence {
+                        yield(sessionEntity.personaJson.legacyStoryLore())
+                        storedMembers.forEach { yield(it.personaJson.legacyStoryLore()) }
+                    }.firstOrNull { it.isNotBlank() }.orEmpty()
+                }.take(16_000),
+                levelSystemEnabled = sessionEntity.levelSystemEnabled,
+                levelXp = sessionEntity.levelXp.coerceIn(0, 1500),
+                projectId = sessionEntity.projectId,
                 background = sessionEntity.backgroundJson.toChatBackground(),
                 preview = sessionEntity.preview.ifBlank { "No messages yet" },
                 updatedAt = sessionEntity.updatedAt.ifBlank { "Now" },
@@ -51,10 +67,19 @@ class ChatRepository private constructor(
         val sessionEntities = sessions.mapIndexed { index, session ->
             ChatSessionEntity(
                 id = session.id,
+                title = session.title,
+                headerAvatarUri = session.headerAvatarUri?.toString(),
+                headerAvatarScale = session.headerAvatarScale,
+                headerAvatarOffsetX = session.headerAvatarOffsetX,
+                headerAvatarOffsetY = session.headerAvatarOffsetY,
                 personaJson = session.persona.toJsonString(),
                 activeMemberId = session.activeMemberId,
                 responseRounds = session.responseRounds.coerceIn(1, 3),
                 memoryEnabled = session.memoryEnabled,
+                storyLore = session.storyLore.take(16_000),
+                levelSystemEnabled = session.levelSystemEnabled,
+                levelXp = session.levelXp.coerceIn(0, 1500),
+                projectId = session.projectId,
                 backgroundJson = session.background.toJsonString(),
                 preview = session.preview,
                 updatedAt = session.updatedAt,
@@ -175,14 +200,21 @@ private fun MessageEntity.toChatMessage(): ChatMessage {
     return ChatMessage(
         id = id,
         role = role,
-        content = content,
+        content = normalizeCallTranscriptContent(content),
         speakerId = speakerId,
         speakerName = speakerName,
-        imageUris = imageUris.take(6),
+        imageUris = imageUris.take(12),
         remoteImageUrl = remoteImageUrl,
         isImageLoading = false,
         time = time.ifBlank { "" }
     )
+}
+
+private fun normalizeCallTranscriptContent(content: String): String {
+    return content
+        .removePrefix("[User]:")
+        .removePrefix("[AI]:")
+        .trimStart()
 }
 
 private fun PersonaUiState.toJsonString(): String {
@@ -197,6 +229,7 @@ private fun PersonaUiState.toJsonString(): String {
         .put("vendor", vendor.id)
         .put("model", model)
         .put("safetyLevel", safetyLevel.name)
+        .put("thinkingEffort", thinkingEffort.name)
         .put("temperature", temperature.toDouble())
         .put("avatarUri", avatarUri?.toString() ?: JSONObject.NULL)
         .put("avatarScale", avatarScale.toDouble())
@@ -232,6 +265,8 @@ private fun String.toPersonaUiState(): PersonaUiState {
         vendor = vendor,
         model = json.optString("model").ifBlank { vendor.defaultModel },
         safetyLevel = SafetyLevel.entries.firstOrNull { it.name == json.optString("safetyLevel") } ?: SafetyLevel.None,
+        thinkingEffort = GeminiThinkingEffort.entries.firstOrNull { it.name == json.optString("thinkingEffort") }
+            ?: GeminiThinkingEffort.Low,
         temperature = json.optDouble("temperature", 1.0).toFloat().coerceIn(0f, 2f),
         avatarUri = json.optNullableString("avatarUri")?.let(Uri::parse),
         avatarScale = json.optDouble("avatarScale", 1.0).toFloat().coerceIn(1f, 4f),
@@ -239,6 +274,10 @@ private fun String.toPersonaUiState(): PersonaUiState {
         avatarOffsetY = json.optDouble("avatarOffsetY", 0.0).toFloat().coerceIn(-180f, 180f),
         traits = traits.ifEmpty { listOf("Empathetic", "Encouraging", "Curious", "Calm") }
     )
+}
+
+private fun String.legacyStoryLore(): String {
+    return safeJsonObject(this).optString("storyLore")
 }
 
 private fun ChatBackground.toJsonString(): String {

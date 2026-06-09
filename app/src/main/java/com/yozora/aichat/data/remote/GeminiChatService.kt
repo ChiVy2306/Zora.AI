@@ -6,8 +6,8 @@ import com.google.ai.client.generativeai.GenerativeModel
 import com.google.ai.client.generativeai.type.BlockThreshold
 import com.google.ai.client.generativeai.type.HarmCategory
 import com.google.ai.client.generativeai.type.SafetySetting
-import com.google.ai.client.generativeai.type.content
 import com.google.ai.client.generativeai.type.generationConfig
+import com.yozora.aichat.data.SkillRepository
 import com.yozora.aichat.data.db.MessageEntity
 import com.yozora.aichat.data.db.PersonaEntity
 import com.yozora.aichat.ui.chat.ApiVendor
@@ -55,7 +55,9 @@ private const val FALLBACK_MASTER_PROMPT = """
 You are a customizable AI companion. Follow the persona instruction prompt for the active session, keep replies immersive and useful, and ask for clarification when the user request is unclear.
 """
 
-class GeminiChatService {
+class GeminiChatService(
+    private val skillRepository: SkillRepository? = null
+) {
     fun supportsImageInput(vendor: ApiVendor, model: String): Boolean {
         val normalized = model.lowercase(Locale.US)
         return when (vendor) {
@@ -275,43 +277,45 @@ class GeminiChatService {
         finalSystemPrompt: String,
         safetyLevel: SafetyLevel,
         images: List<Bitmap>
-    ): GeminiChatReply {
-        val model = GenerativeModel(
-            modelName = persona.model,
-            apiKey = apiKey,
-            generationConfig = generationConfig {
-                temperature = persona.temperature
-                maxOutputTokens = 8192
-            },
-            safetySettings = safetySettings(safetyLevel),
-            systemInstruction = content { text(finalSystemPrompt) }
-        )
-
-        val chatHistory = history.mapNotNull { message ->
-            when (message.role) {
-                "user" -> content(role = "user") { text(message.content) }
-                "model" -> content(role = "model") { text(message.content) }
-                else -> null
+    ): GeminiChatReply = withContext(Dispatchers.IO) {
+        val contents = JSONArray()
+        history.forEach { message ->
+            val role = when (message.role) {
+                "model" -> "model"
+                "user" -> "user"
+                else -> return@forEach
             }
-        }
-
-        val chat = model.startChat(chatHistory)
-        val response = if (images.isEmpty()) {
-            chat.sendMessage(userInput)
-        } else {
-            chat.sendMessage(
-                content(role = "user") {
-                    text(userInput)
-                    images.forEach { image(it) }
-                }
+            contents.put(
+                JSONObject()
+                    .put("role", role)
+                    .put("parts", JSONArray().put(JSONObject().put("text", message.content)))
             )
         }
-        val usage = response.usageMetadata
-        return GeminiChatReply(
-            text = response.text.orEmpty(),
-            promptTokenCount = usage?.promptTokenCount ?: 0,
-            responseTokenCount = usage?.candidatesTokenCount ?: 0,
-            totalTokenCount = usage?.totalTokenCount ?: 0
+        contents.put(
+            JSONObject()
+                .put("role", "user")
+                .put("parts", geminiParts(userInput, images))
+        )
+
+        val body = JSONObject()
+            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", finalSystemPrompt))))
+            .put("contents", contents)
+            .put("generationConfig", geminiGenerationConfig(persona, 8192))
+            .put("safetySettings", geminiRestSafetySettings(safetyLevel))
+
+        val json = postJson(
+            url = "https://generativelanguage.googleapis.com/v1beta/models/${persona.model}:generateContent",
+            headers = mapOf("x-goog-api-key" to apiKey),
+            body = body
+        )
+        val candidate = json.optJSONArray("candidates")?.optJSONObject(0)
+            ?: error("No Gemini response candidate returned.")
+        val usage = json.optJSONObject("usageMetadata")
+        GeminiChatReply(
+            text = extractGeminiRestText(candidate),
+            promptTokenCount = usage?.optInt("promptTokenCount") ?: 0,
+            responseTokenCount = usage?.optInt("candidatesTokenCount") ?: 0,
+            totalTokenCount = usage?.optInt("totalTokenCount") ?: 0
         )
     }
 
@@ -341,12 +345,7 @@ class GeminiChatService {
         val body = JSONObject()
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", finalSystemPrompt))))
             .put("contents", contents)
-            .put(
-                "generationConfig",
-                JSONObject()
-                    .put("temperature", persona.temperature.toDouble())
-                    .put("maxOutputTokens", 8192)
-            )
+            .put("generationConfig", geminiGenerationConfig(persona, 8192))
             .put("safetySettings", geminiRestSafetySettings(safetyLevel))
             .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
 
@@ -394,12 +393,7 @@ class GeminiChatService {
         val body = JSONObject()
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", finalSystemPrompt))))
             .put("contents", contents)
-            .put(
-                "generationConfig",
-                JSONObject()
-                    .put("temperature", persona.temperature.toDouble())
-                    .put("maxOutputTokens", 8192)
-            )
+            .put("generationConfig", geminiGenerationConfig(persona, 8192))
             .put("safetySettings", geminiRestSafetySettings(safetyLevel))
             .put(
                 "tools",
@@ -658,9 +652,11 @@ class GeminiChatService {
 
     private fun finalSystemPrompt(masterPrompt: String?, persona: PersonaEntity): String {
         val baseMasterPrompt = masterPrompt?.takeIf { it.isNotBlank() } ?: FALLBACK_MASTER_PROMPT
-        return baseMasterPrompt.trimIndent() +
-            "\n\n---\n\n" +
+        return listOfNotNull(
+            baseMasterPrompt.trimIndent(),
+            skillRepository?.combinedContent?.takeIf { it.isNotBlank() },
             persona.systemPrompt.trim()
+        ).joinToString("\n\n---\n\n")
     }
 
     private fun toolUseInstruction(enabledTools: Set<String>): String {
@@ -897,6 +893,19 @@ class GeminiChatService {
                 )
             }
         }
+    }
+
+    private fun geminiGenerationConfig(persona: PersonaEntity, maxOutputTokens: Int): JSONObject {
+        return JSONObject()
+            .put("temperature", persona.temperature.toDouble())
+            .put("maxOutputTokens", maxOutputTokens)
+            .apply {
+                persona.thinkingBudget
+                    ?.takeIf { budget -> budget > 0 }
+                    ?.let { budget ->
+                        put("thinkingConfig", JSONObject().put("thinkingBudget", budget))
+                    }
+            }
     }
 
     private fun geminiRestSafetySettings(level: SafetyLevel): JSONArray {
